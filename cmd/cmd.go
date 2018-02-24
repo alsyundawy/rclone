@@ -14,24 +14,51 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/pprof"
-	"strings"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
 	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/accounting"
+	"github.com/ncw/rclone/fs/config"
+	"github.com/ncw/rclone/fs/config/configflags"
+	"github.com/ncw/rclone/fs/config/flags"
+	"github.com/ncw/rclone/fs/filter"
+	"github.com/ncw/rclone/fs/filter/filterflags"
+	"github.com/ncw/rclone/fs/fserrors"
+	"github.com/ncw/rclone/fs/fspath"
+	fslog "github.com/ncw/rclone/fs/log"
+	"github.com/ncw/rclone/lib/atexit"
 )
 
 // Globals
 var (
 	// Flags
-	cpuProfile    = fs.StringP("cpuprofile", "", "", "Write cpu profile to file")
-	memProfile    = fs.StringP("memprofile", "", "", "Write memory profile to file")
-	statsInterval = fs.DurationP("stats", "", time.Minute*1, "Interval between printing stats, e.g 500ms, 60s, 5m. (0 to disable)")
-	dataRateUnit  = fs.StringP("stats-unit", "", "bytes", "Show data rate in stats as either 'bits' or 'bytes'/s")
+	cpuProfile    = flags.StringP("cpuprofile", "", "", "Write cpu profile to file")
+	memProfile    = flags.StringP("memprofile", "", "", "Write memory profile to file")
+	statsInterval = flags.DurationP("stats", "", time.Minute*1, "Interval between printing stats, e.g 500ms, 60s, 5m. (0 to disable)")
+	dataRateUnit  = flags.StringP("stats-unit", "", "bytes", "Show data rate in stats as either 'bits' or 'bytes'/s")
 	version       bool
-	retries       = fs.IntP("retries", "", 3, "Retry operations this many times if they fail")
+	retries       = flags.IntP("retries", "", 3, "Retry operations this many times if they fail")
+	// Errors
+	errorCommandNotFound    = errors.New("command not found")
+	errorUncategorized      = errors.New("uncategorized error")
+	errorNotEnoughArguments = errors.New("not enough arguments")
+	errorTooManyArguents    = errors.New("too many arguments")
+	errorUsageError         = errors.New("usage error")
+)
+
+const (
+	exitCodeSuccess = iota
+	exitCodeUsageError
+	exitCodeUncategorizedError
+	exitCodeDirNotFound
+	exitCodeFileNotFound
+	exitCodeRetryError
+	exitCodeNoRetryError
+	exitCodeFatalError
 )
 
 // Root is the main rclone command
@@ -40,17 +67,25 @@ var Root = &cobra.Command{
 	Short: "Sync files and directories to and from local and remote object stores - " + fs.Version,
 	Long: `
 Rclone is a command line program to sync files and directories to and
-from various cloud storage systems, such as:
+from various cloud storage systems and using file transfer services, such as:
 
-  * Google Drive
-  * Amazon S3
-  * Openstack Swift / Rackspace cloud files / Memset Memstore
-  * Dropbox
-  * Google Cloud Storage
   * Amazon Drive
-  * Microsoft One Drive
-  * Hubic
+  * Amazon S3
   * Backblaze B2
+  * Box
+  * Dropbox
+  * FTP
+  * Google Cloud Storage
+  * Google Drive
+  * HTTP
+  * Hubic
+  * Microsoft Azure Blob Storage
+  * Microsoft OneDrive
+  * Openstack Swift / Rackspace cloud files / Memset Memstore
+  * pCloud
+  * QingStor
+  * SFTP
+  * Webdav / Owncloud / Nextcloud
   * Yandex Disk
   * The local filesystem
 
@@ -67,11 +102,11 @@ Features
 See the home page for installation, usage, documentation, changelog
 and configuration walkthroughs.
 
-  * http://rclone.org/
+  * https://rclone.org/
 `,
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
 		fs.Debugf("rclone", "Version %q finishing with parameters %q", fs.Version, os.Args)
-		runAtExitFunctions()
+		atexit.Run()
 	},
 }
 
@@ -79,15 +114,19 @@ and configuration walkthroughs.
 func runRoot(cmd *cobra.Command, args []string) {
 	if version {
 		ShowVersion()
-		os.Exit(0)
+		resolveExitCode(nil)
 	} else {
 		_ = Root.Usage()
 		fmt.Fprintf(os.Stderr, "Command not found.\n")
-		os.Exit(1)
+		resolveExitCode(errorCommandNotFound)
 	}
 }
 
 func init() {
+	// Add global flags
+	configflags.AddFlags(pflag.CommandLine)
+	filterflags.AddFlags(pflag.CommandLine)
+
 	Root.Run = runRoot
 	Root.Flags().BoolVarP(&version, "version", "V", false, "Print the version number")
 	cobra.OnInitialize(initConfig)
@@ -96,6 +135,8 @@ func init() {
 // ShowVersion prints the version to stdout
 func ShowVersion() {
 	fmt.Printf("rclone %s\n", fs.Version)
+	fmt.Printf("- os/arch: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	fmt.Printf("- go version: %s\n", runtime.Version())
 }
 
 // newFsFile creates a dst Fs from a name but may point to a file.
@@ -104,7 +145,7 @@ func ShowVersion() {
 func newFsFile(remote string) (fs.Fs, string) {
 	fsInfo, configName, fsPath, err := fs.ParseRemote(remote)
 	if err != nil {
-		fs.Stats.Error()
+		fs.CountError(err)
 		log.Fatalf("Failed to create file system for %q: %v", remote, err)
 	}
 	f, err := fsInfo.NewFs(configName, fsPath)
@@ -114,7 +155,7 @@ func newFsFile(remote string) (fs.Fs, string) {
 	case nil:
 		return f, ""
 	default:
-		fs.Stats.Error()
+		fs.CountError(err)
 		log.Fatalf("Failed to create file system for %q: %v", remote, err)
 	}
 	return nil, ""
@@ -128,18 +169,17 @@ func newFsFile(remote string) (fs.Fs, string) {
 func newFsSrc(remote string) (fs.Fs, string) {
 	f, fileName := newFsFile(remote)
 	if fileName != "" {
-		if !fs.Config.Filter.InActive() {
-			fs.Stats.Error()
-			log.Fatalf("Can't limit to single files when using filters: %v", remote)
+		if !filter.Active.InActive() {
+			err := errors.Errorf("Can't limit to single files when using filters: %v", remote)
+			fs.CountError(err)
+			log.Fatalf(err.Error())
 		}
 		// Limit transfers to this file
-		err := fs.Config.Filter.AddFile(fileName)
+		err := filter.Active.AddFile(fileName)
 		if err != nil {
-			fs.Stats.Error()
+			fs.CountError(err)
 			log.Fatalf("Failed to limit to single file %q: %v", remote, err)
 		}
-		// Set --no-traverse as only one file
-		fs.Config.NoTraverse = true
 	}
 	return f, fileName
 }
@@ -150,7 +190,7 @@ func newFsSrc(remote string) (fs.Fs, string) {
 func newFsDst(remote string) fs.Fs {
 	f, err := fs.NewFs(remote)
 	if err != nil {
-		fs.Stats.Error()
+		fs.CountError(err)
 		log.Fatalf("Failed to create file system for %q: %v", remote, err)
 	}
 	return f
@@ -164,49 +204,33 @@ func NewFsSrcDst(args []string) (fs.Fs, fs.Fs) {
 	return fsrc, fdst
 }
 
-// RemoteSplit splits a remote into a parent and a leaf
-//
-// if it returns parent as an empty string then it wasn't possible
-func RemoteSplit(remote string) (parent string, leaf string) {
-	// Split remote on :
-	i := strings.Index(remote, ":")
-	remoteName := ""
-	remotePath := remote
-	if i >= 0 {
-		remoteName = remote[:i+1]
-		remotePath = remote[i+1:]
-	}
-	if remotePath == "" {
-		return "", ""
-	}
-	// Construct new remote name without last segment
-	parent, leaf = path.Split(remotePath)
-	if leaf == "" {
-		return "", ""
-	}
-	if parent != "/" {
-		parent = strings.TrimSuffix(parent, "/")
-	}
-	parent = remoteName + parent
-	if parent == "" {
-		parent = "."
-	}
-	return parent, leaf
-}
-
 // NewFsSrcDstFiles creates a new src and dst fs from the arguments
 // If src is a file then srcFileName and dstFileName will be non-empty
 func NewFsSrcDstFiles(args []string) (fsrc fs.Fs, srcFileName string, fdst fs.Fs, dstFileName string) {
 	fsrc, srcFileName = newFsSrc(args[0])
 	// If copying a file...
 	dstRemote := args[1]
+	// If file exists then srcFileName != "", however if the file
+	// doesn't exist then we assume it is a directory...
 	if srcFileName != "" {
-		dstRemote, dstFileName = RemoteSplit(dstRemote)
+		dstRemote, dstFileName = fspath.RemoteSplit(dstRemote)
 		if dstRemote == "" {
-			log.Fatalf("Can't find parent directory for %q", args[1])
+			dstRemote = "."
+		}
+		if dstFileName == "" {
+			log.Fatalf("%q is a directory", args[1])
 		}
 	}
-	fdst = newFsDst(dstRemote)
+	fdst, err := fs.NewFs(dstRemote)
+	switch err {
+	case fs.ErrorIsFile:
+		fs.CountError(err)
+		log.Fatalf("Source doesn't exist or is a directory and destination is a file")
+	case nil:
+	default:
+		fs.CountError(err)
+		log.Fatalf("Failed to create file system for destination %q: %v", dstRemote, err)
+	}
 	fs.CalculateModifyWindow(fdst, fsrc)
 	return
 }
@@ -225,6 +249,20 @@ func NewFsDst(args []string) fs.Fs {
 	fdst := newFsDst(args[0])
 	fs.CalculateModifyWindow(fdst)
 	return fdst
+}
+
+// NewFsDstFile creates a new dst fs with a destination file name from the arguments
+func NewFsDstFile(args []string) (fdst fs.Fs, dstFileName string) {
+	dstRemote, dstFileName := fspath.RemoteSplit(args[0])
+	if dstRemote == "" {
+		dstRemote = "."
+	}
+	if dstFileName == "" {
+		log.Fatalf("%q is a directory", args[0])
+	}
+	fdst = newFsDst(dstRemote)
+	fs.CalculateModifyWindow(fdst)
+	return
 }
 
 // ShowStats returns true if the user added a `--stats` flag to the command line.
@@ -248,41 +286,42 @@ func Run(Retry bool, showStats bool, cmd *cobra.Command, f func() error) {
 	}
 	for try := 1; try <= *retries; try++ {
 		err = f()
-		if !Retry || (err == nil && !fs.Stats.Errored()) {
+		if !Retry || (err == nil && !accounting.Stats.Errored()) {
 			if try > 1 {
 				fs.Errorf(nil, "Attempt %d/%d succeeded", try, *retries)
 			}
 			break
 		}
-		if fs.IsFatalError(err) {
+		if fserrors.IsFatalError(err) {
 			fs.Errorf(nil, "Fatal error received - not attempting retries")
 			break
 		}
-		if fs.IsNoRetryError(err) {
+		if fserrors.IsNoRetryError(err) {
 			fs.Errorf(nil, "Can't retry this error - not attempting retries")
 			break
 		}
 		if err != nil {
-			fs.Errorf(nil, "Attempt %d/%d failed with %d errors and: %v", try, *retries, fs.Stats.GetErrors(), err)
+			fs.Errorf(nil, "Attempt %d/%d failed with %d errors and: %v", try, *retries, accounting.Stats.GetErrors(), err)
 		} else {
-			fs.Errorf(nil, "Attempt %d/%d failed with %d errors", try, *retries, fs.Stats.GetErrors())
+			fs.Errorf(nil, "Attempt %d/%d failed with %d errors", try, *retries, accounting.Stats.GetErrors())
 		}
 		if try < *retries {
-			fs.Stats.ResetErrors()
+			accounting.Stats.ResetErrors()
 		}
 	}
 	if showStats {
 		close(stopStats)
 	}
 	if err != nil {
-		log.Fatalf("Failed to %s: %v", cmd.Name(), err)
+		log.Printf("Failed to %s: %v", cmd.Name(), err)
+		resolveExitCode(err)
 	}
-	if showStats && (fs.Stats.Errored() || *statsInterval > 0) {
-		fs.Infof(nil, "%s", fs.Stats)
+	if showStats && (accounting.Stats.Errored() || *statsInterval > 0) {
+		accounting.Stats.Log()
 	}
 	fs.Debugf(nil, "Go routines at exit %d\n", runtime.NumGoroutine())
-	if fs.Stats.Errored() {
-		os.Exit(1)
+	if accounting.Stats.Errored() {
+		resolveExitCode(accounting.Stats.GetLastError())
 	}
 }
 
@@ -291,11 +330,13 @@ func CheckArgs(MinArgs, MaxArgs int, cmd *cobra.Command, args []string) {
 	if len(args) < MinArgs {
 		_ = cmd.Usage()
 		fmt.Fprintf(os.Stderr, "Command %s needs %d arguments mininum\n", cmd.Name(), MinArgs)
-		os.Exit(1)
+		// os.Exit(1)
+		resolveExitCode(errorNotEnoughArguments)
 	} else if len(args) > MaxArgs {
 		_ = cmd.Usage()
 		fmt.Fprintf(os.Stderr, "Command %s needs %d arguments maximum\n", cmd.Name(), MaxArgs)
-		os.Exit(1)
+		// os.Exit(1)
+		resolveExitCode(errorTooManyArguents)
 	}
 }
 
@@ -310,7 +351,7 @@ func StartStats() chan struct{} {
 			for {
 				select {
 				case <-ticker.C:
-					fs.Stats.Log()
+					accounting.Stats.Log()
 				case <-stopStats:
 					ticker.Stop()
 					return
@@ -324,10 +365,20 @@ func StartStats() chan struct{} {
 // initConfig is run by cobra after initialising the flags
 func initConfig() {
 	// Start the logger
-	fs.InitLogging()
+	fslog.InitLogging()
+
+	// Finish parsing any command line flags
+	configflags.SetFlags()
 
 	// Load the rest of the config now we have started the logger
-	fs.LoadConfig()
+	config.LoadConfig()
+
+	// Load filters
+	var err error
+	filter.Active, err = filter.NewFilter(&filterflags.Opt)
+	if err != nil {
+		log.Fatalf("Failed to load filters: %v", err)
+	}
 
 	// Write the args for debug purposes
 	fs.Debugf("rclone", "Version %q starting with parameters %q", fs.Version, os.Args)
@@ -337,36 +388,36 @@ func initConfig() {
 		fs.Infof(nil, "Creating CPU profile %q\n", *cpuProfile)
 		f, err := os.Create(*cpuProfile)
 		if err != nil {
-			fs.Stats.Error()
+			fs.CountError(err)
 			log.Fatal(err)
 		}
 		err = pprof.StartCPUProfile(f)
 		if err != nil {
-			fs.Stats.Error()
+			fs.CountError(err)
 			log.Fatal(err)
 		}
-		AtExit(func() {
+		atexit.Register(func() {
 			pprof.StopCPUProfile()
 		})
 	}
 
 	// Setup memory profiling if desired
 	if *memProfile != "" {
-		AtExit(func() {
+		atexit.Register(func() {
 			fs.Infof(nil, "Saving Memory profile %q\n", *memProfile)
 			f, err := os.Create(*memProfile)
 			if err != nil {
-				fs.Stats.Error()
+				fs.CountError(err)
 				log.Fatal(err)
 			}
 			err = pprof.WriteHeapProfile(f)
 			if err != nil {
-				fs.Stats.Error()
+				fs.CountError(err)
 				log.Fatal(err)
 			}
 			err = f.Close()
 			if err != nil {
-				fs.Stats.Error()
+				fs.CountError(err)
 				log.Fatal(err)
 			}
 		})
@@ -377,5 +428,30 @@ func initConfig() {
 		fs.Config.DataRateUnit = "bytes"
 	} else {
 		fs.Config.DataRateUnit = *dataRateUnit
+	}
+}
+
+func resolveExitCode(err error) {
+	if err == nil {
+		os.Exit(exitCodeSuccess)
+	}
+
+	err = errors.Cause(err)
+
+	switch {
+	case err == fs.ErrorDirNotFound:
+		os.Exit(exitCodeDirNotFound)
+	case err == fs.ErrorObjectNotFound:
+		os.Exit(exitCodeFileNotFound)
+	case err == errorUncategorized:
+		os.Exit(exitCodeUncategorizedError)
+	case fserrors.ShouldRetry(err):
+		os.Exit(exitCodeRetryError)
+	case fserrors.IsNoRetryError(err):
+		os.Exit(exitCodeNoRetryError)
+	case fserrors.IsFatalError(err):
+		os.Exit(exitCodeFatalError)
+	default:
+		os.Exit(exitCodeUsageError)
 	}
 }

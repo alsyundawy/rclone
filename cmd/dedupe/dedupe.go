@@ -4,12 +4,12 @@ import (
 	"log"
 
 	"github.com/ncw/rclone/cmd"
-	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/operations"
 	"github.com/spf13/cobra"
 )
 
 var (
-	dedupeMode = fs.DeduplicateInteractive
+	dedupeMode = operations.DeduplicateInteractive
 )
 
 func init() {
@@ -19,11 +19,15 @@ func init() {
 
 var commandDefintion = &cobra.Command{
 	Use:   "dedupe [mode] remote:path",
-	Short: `Interactively find duplicate files delete/rename them.`,
+	Short: `Interactively find duplicate files and delete/rename them.`,
 	Long: `
-By default ` + "`" + `dedup` + "`" + ` interactively finds duplicate files and offers to
+By default ` + "`" + `dedupe` + "`" + ` interactively finds duplicate files and offers to
 delete all but one or rename them to be different. Only useful with
 Google Drive which can have duplicate file names.
+
+In the first pass it will merge directories with the same name.  It
+will do this iteratively until all the identical directories have been
+merged.
 
 The ` + "`" + `dedupe` + "`" + ` command will delete all but one of any identical (same
 md5sum) files it finds without confirmation.  This means that for most
@@ -107,7 +111,7 @@ Or
 		}
 		fdst := cmd.NewFsSrc(args)
 		cmd.Run(false, false, command, func() error {
-			return fs.Deduplicate(fdst, dedupeMode)
+			return operations.Deduplicate(fdst, dedupeMode)
 		})
 	},
 }

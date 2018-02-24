@@ -50,7 +50,9 @@ Choose a number from below, or type in your own value
    \ "onedrive"
 11 / Openstack Swift (Rackspace Cloud Files, Memset Memstore, OVH)
    \ "swift"
-12 / Yandex Disk
+12 / SSH/SFTP Connection
+   \ "sftp"
+13 / Yandex Disk
    \ "yandex"
 Storage> 8
 Hubic Client Id - leave blank normally.
@@ -107,6 +109,12 @@ If you want the directory to be visible in the official *Hubic
 browser*, you need to copy your files to the `default` directory
 
     rclone copy /home/source remote:default/backup
+
+### --fast-list ###
+
+This remote supports `--fast-list` which allows you to use fewer
+transactions in exchange for more memory. See the [rclone
+docs](/docs/#fast-list) for more details.
 
 ### Modified time ###
 

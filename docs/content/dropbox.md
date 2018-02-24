@@ -52,7 +52,9 @@ Choose a number from below, or type in your own value
    \ "onedrive"
 11 / Openstack Swift (Rackspace Cloud Files, Memset Memstore, OVH)
    \ "swift"
-12 / Yandex Disk
+12 / SSH/SFTP Connection
+   \ "sftp"
+13 / Yandex Disk
    \ "yandex"
 Storage> 4
 Dropbox App Key - leave blank normally.
@@ -89,20 +91,20 @@ To copy a local directory to a dropbox directory called backup
 
     rclone copy /home/source remote:backup
 
-### Modified time and MD5SUMs ###
+### Modified time and Hashes ###
 
-Dropbox doesn't provide the ability to set modification times in the
-V1 public API, so rclone can't support modified time with Dropbox.
+Dropbox supports modified times, but the only way to set a
+modification time is to re-upload the file.
 
-This may change in the future - see these issues for details:
+This means that if you uploaded your data with an older version of
+rclone which didn't support the v2 API and modified times, rclone will
+decide to upload all your old data to fix the modification times.  If
+you don't want this to happen use `--size-only` or `--checksum` flag
+to stop it.
 
-  * [Dropbox V2 API](https://github.com/ncw/rclone/issues/349)
-  * [Allow syncs for remotes that can't set modtime on existing objects](https://github.com/ncw/rclone/issues/348)
-
-Dropbox doesn't return any sort of checksum (MD5 or SHA1).
-
-Together that means that syncs to dropbox will effectively have the
-`--size-only` flag set.
+Dropbox supports [its own hash
+type](https://www.dropbox.com/developers/reference/content-hash) which
+is checked for all transfers.
 
 ### Specific options ###
 
@@ -111,8 +113,13 @@ system.
 
 #### --dropbox-chunk-size=SIZE ####
 
-Upload chunk size. Max 150M. The default is 128MB.  Note that this
-isn't buffered into memory.
+Any files larger than this will be uploaded in chunks of this
+size. The default is 48MB. The maximum is 150MB.
+
+Note that chunks are buffered in memory (one at a time) so rclone can
+deal with retries.  Setting this larger will increase the speed
+slightly (at most 10% for 128MB in tests) at the cost of using more
+memory.  It can be set smaller if you are tight on memory.
 
 ### Limitations ###
 
@@ -128,4 +135,4 @@ attempt to upload one of those file names, but the sync won't fail.
 If you have more than 10,000 files in a directory then `rclone purge
 dropbox:dir` will return the error `Failed to purge: There are too
 many files involved in this operation`.  As a work-around do an
-`rclone delete dropbix:dir` followed by an `rclone rmdir dropbox:dir`.
+`rclone delete dropbox:dir` followed by an `rclone rmdir dropbox:dir`.

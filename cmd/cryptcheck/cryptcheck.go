@@ -1,9 +1,11 @@
 package cryptcheck
 
 import (
+	"github.com/ncw/rclone/backend/crypt"
 	"github.com/ncw/rclone/cmd"
-	"github.com/ncw/rclone/crypt"
 	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/hash"
+	"github.com/ncw/rclone/fs/operations"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 )
@@ -14,7 +16,7 @@ func init() {
 
 var commandDefintion = &cobra.Command{
 	Use:   "cryptcheck remote:path cryptedremote:path",
-	Short: `Cryptcheck checks the integritity of a crypted remote.`,
+	Short: `Cryptcheck checks the integrity of a crypted remote.`,
 	Long: `
 rclone cryptcheck checks a remote against a crypted remote.  This is
 the equivalent of running rclone check, but able to check the
@@ -58,7 +60,7 @@ func cryptCheck(fdst, fsrc fs.Fs) error {
 	// Find a hash to use
 	funderlying := fcrypt.UnWrap()
 	hashType := funderlying.Hashes().GetOne()
-	if hashType == fs.HashNone {
+	if hashType == hash.None {
 		return errors.Errorf("%s:%s does not support any hashes", funderlying.Name(), funderlying.Root())
 	}
 	fs.Infof(nil, "Using %v for hash comparisons", hashType)
@@ -72,7 +74,7 @@ func cryptCheck(fdst, fsrc fs.Fs) error {
 		underlyingDst := cryptDst.UnWrap()
 		underlyingHash, err := underlyingDst.Hash(hashType)
 		if err != nil {
-			fs.Stats.Error()
+			fs.CountError(err)
 			fs.Errorf(dst, "Error reading hash from underlying %v: %v", underlyingDst, err)
 			return true, false
 		}
@@ -81,7 +83,7 @@ func cryptCheck(fdst, fsrc fs.Fs) error {
 		}
 		cryptHash, err := fcrypt.ComputeHash(cryptDst, src, hashType)
 		if err != nil {
-			fs.Stats.Error()
+			fs.CountError(err)
 			fs.Errorf(dst, "Error computing hash: %v", err)
 			return true, false
 		}
@@ -89,13 +91,14 @@ func cryptCheck(fdst, fsrc fs.Fs) error {
 			return false, true
 		}
 		if cryptHash != underlyingHash {
-			fs.Stats.Error()
-			fs.Errorf(src, "hashes differ (%s:%s) %q vs (%s:%s) %q", fdst.Name(), fdst.Root(), cryptHash, fsrc.Name(), fsrc.Root(), underlyingHash)
+			err = errors.Errorf("hashes differ (%s:%s) %q vs (%s:%s) %q", fdst.Name(), fdst.Root(), cryptHash, fsrc.Name(), fsrc.Root(), underlyingHash)
+			fs.CountError(err)
+			fs.Errorf(src, err.Error())
 			return true, false
 		}
 		fs.Debugf(src, "OK")
 		return false, false
 	}
 
-	return fs.CheckFn(fcrypt, fsrc, checkIdentical)
+	return operations.CheckFn(fcrypt, fsrc, checkIdentical)
 }

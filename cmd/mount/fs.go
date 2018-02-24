@@ -5,106 +5,44 @@
 package mount
 
 import (
-	"time"
+	"syscall"
 
 	"bazil.org/fuse"
 	fusefs "bazil.org/fuse/fs"
 	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/log"
+	"github.com/ncw/rclone/vfs"
+	"github.com/ncw/rclone/vfs/vfsflags"
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 )
 
 // FS represents the top level filing system
 type FS struct {
+	*vfs.VFS
 	f fs.Fs
 }
 
 // Check interface satistfied
 var _ fusefs.FS = (*FS)(nil)
 
+// NewFS makes a new FS
+func NewFS(f fs.Fs) *FS {
+	fsys := &FS{
+		VFS: vfs.New(f, &vfsflags.Opt),
+		f:   f,
+	}
+	return fsys
+}
+
 // Root returns the root node
-func (f *FS) Root() (fusefs.Node, error) {
-	fs.Debugf(f.f, "Root()")
-	fsDir := &fs.Dir{
-		Name: "",
-		When: time.Now(),
-	}
-	return newDir(f.f, fsDir), nil
-}
-
-// mountOptions configures the options from the command line flags
-func mountOptions(device string) (options []fuse.MountOption) {
-	options = []fuse.MountOption{
-		fuse.MaxReadahead(uint32(maxReadAhead)),
-		fuse.Subtype("rclone"),
-		fuse.FSName(device), fuse.VolumeName(device),
-		fuse.NoAppleDouble(),
-		fuse.NoAppleXattr(),
-
-		// Options from benchmarking in the fuse module
-		//fuse.MaxReadahead(64 * 1024 * 1024),
-		//fuse.AsyncRead(), - FIXME this causes
-		// ReadFileHandle.Read error: read /home/files/ISOs/xubuntu-15.10-desktop-amd64.iso: bad file descriptor
-		// which is probably related to errors people are having
-		//fuse.WritebackCache(),
-	}
-	if allowNonEmpty {
-		options = append(options, fuse.AllowNonEmptyMount())
-	}
-	if allowOther {
-		options = append(options, fuse.AllowOther())
-	}
-	if allowRoot {
-		options = append(options, fuse.AllowRoot())
-	}
-	if defaultPermissions {
-		options = append(options, fuse.DefaultPermissions())
-	}
-	if readOnly {
-		options = append(options, fuse.ReadOnly())
-	}
-	if writebackCache {
-		options = append(options, fuse.WritebackCache())
-	}
-	return options
-}
-
-// mount the file system
-//
-// The mount point will be ready when this returns.
-//
-// returns an error, and an error channel for the serve process to
-// report an error when fusermount is called.
-func mount(f fs.Fs, mountpoint string) (<-chan error, error) {
-	fs.Debugf(f, "Mounting on %q", mountpoint)
-	c, err := fuse.Mount(mountpoint, mountOptions(f.Name()+":"+f.Root())...)
+func (f *FS) Root() (node fusefs.Node, err error) {
+	defer log.Trace("", "")("node=%+v, err=%v", &node, &err)
+	root, err := f.VFS.Root()
 	if err != nil {
-		return nil, err
+		return nil, translateError(err)
 	}
-
-	filesys := &FS{
-		f: f,
-	}
-
-	server := fusefs.New(c, nil)
-
-	// Serve the mount point in the background returning error to errChan
-	errChan := make(chan error, 1)
-	go func() {
-		err := server.Serve(filesys)
-		closeErr := c.Close()
-		if err == nil {
-			err = closeErr
-		}
-		errChan <- err
-	}()
-
-	// check if the mount process has an error to report
-	<-c.Ready
-	if err := c.MountError; err != nil {
-		return nil, err
-	}
-
-	return errChan, nil
+	return &Dir{root}, nil
 }
 
 // Check interface satsified
@@ -112,7 +50,8 @@ var _ fusefs.FSStatfser = (*FS)(nil)
 
 // Statfs is called to obtain file system metadata.
 // It should write that data to resp.
-func (f *FS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.StatfsResponse) error {
+func (f *FS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.StatfsResponse) (err error) {
+	defer log.Trace("", "")("stat=%+v, err=%v", resp, &err)
 	const blockSize = 4096
 	const fsBlocks = (1 << 50) / blockSize
 	resp.Blocks = fsBlocks  // Total data blocks in file system.
@@ -124,4 +63,34 @@ func (f *FS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.Sta
 	resp.Namelen = 255      // Maximum file name length?
 	resp.Frsize = blockSize // Fragment size, smallest addressable data size in the file system.
 	return nil
+}
+
+// Translate errors from mountlib
+func translateError(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch errors.Cause(err) {
+	case vfs.OK:
+		return nil
+	case vfs.ENOENT:
+		return fuse.ENOENT
+	case vfs.EEXIST:
+		return fuse.EEXIST
+	case vfs.EPERM:
+		return fuse.EPERM
+	case vfs.ECLOSED:
+		return fuse.Errno(syscall.EBADF)
+	case vfs.ENOTEMPTY:
+		return fuse.Errno(syscall.ENOTEMPTY)
+	case vfs.ESPIPE:
+		return fuse.Errno(syscall.ESPIPE)
+	case vfs.EBADF:
+		return fuse.Errno(syscall.EBADF)
+	case vfs.EROFS:
+		return fuse.Errno(syscall.EROFS)
+	case vfs.ENOSYS:
+		return fuse.ENOSYS
+	}
+	return err
 }

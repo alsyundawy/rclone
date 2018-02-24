@@ -1,14 +1,23 @@
 language: go
 go_import_path: github.com/pkg/sftp
+
+# current and previous stable releases, plus tip
+# remember to exclude previous and tip for macs below
 go:
-  - 1.5.x
-  - 1.6.x
-  - 1.7.x
+  - 1.8.x
+  - 1.9.x
   - tip
 
 os:
   - linux
   - osx
+
+matrix:
+  exclude:
+    - os: osx
+      go: 1.8.x
+    - os: osx
+      go: tip
 
 sudo: false
 

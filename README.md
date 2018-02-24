@@ -1,29 +1,38 @@
-[![Logo](http://rclone.org/img/rclone-120x120.png)](http://rclone.org/)
+[![Logo](https://rclone.org/img/rclone-120x120.png)](https://rclone.org/)
 
-[Website](http://rclone.org) |
-[Documentation](http://rclone.org/docs/) |
+[Website](https://rclone.org) |
+[Documentation](https://rclone.org/docs/) |
 [Contributing](CONTRIBUTING.md) |
-[Changelog](http://rclone.org/changelog/) |
-[Installation](http://rclone.org/install/) |
+[Changelog](https://rclone.org/changelog/) |
+[Installation](https://rclone.org/install/) |
 [Forum](https://forum.rclone.org/)
 [G+](https://google.com/+RcloneOrg)
 
-
-[![Build Status](https://travis-ci.org/ncw/rclone.svg?branch=master)](https://travis-ci.org/ncw/rclone) [![Windows Build Status](https://ci.appveyor.com/api/projects/status/github/ncw/rclone?branch=master&passingText=windows%20-%20ok&svg=true)](https://ci.appveyor.com/project/ncw/rclone) [![GoDoc](https://godoc.org/github.com/ncw/rclone?status.svg)](https://godoc.org/github.com/ncw/rclone) 
+[![Build Status](https://travis-ci.org/ncw/rclone.svg?branch=master)](https://travis-ci.org/ncw/rclone)
+[![Windows Build Status](https://ci.appveyor.com/api/projects/status/github/ncw/rclone?branch=master&passingText=windows%20-%20ok&svg=true)](https://ci.appveyor.com/project/ncw/rclone)
+[![CircleCI](https://circleci.com/gh/ncw/rclone/tree/master.svg?style=svg)](https://circleci.com/gh/ncw/rclone/tree/master)
+[![GoDoc](https://godoc.org/github.com/ncw/rclone?status.svg)](https://godoc.org/github.com/ncw/rclone) 
 
 Rclone is a command line program to sync files and directories to and from
 
-  * Google Drive
-  * Amazon S3
-  * Openstack Swift / Rackspace cloud files / Memset Memstore
-  * Dropbox
-  * Google Cloud Storage
   * Amazon Drive
-  * Microsoft One Drive
-  * Hubic
+  * Amazon S3 / Dreamhost / Ceph / Minio / Wasabi
   * Backblaze B2
-  * Yandex Disk
+  * Box
+  * Dropbox
+  * FTP
+  * Google Cloud Storage
+  * Google Drive
+  * HTTP
+  * Hubic
+  * Microsoft Azure Blob Storage
+  * Microsoft OneDrive
+  * Openstack Swift / Rackspace cloud files / Memset Memstore / OVH / Oracle Cloud Storage
+  * pCloud
+  * QingStor
   * SFTP
+  * Webdav / Owncloud / Nextcloud
+  * Yandex Disk
   * The local filesystem
 
 Features
@@ -41,7 +50,7 @@ Features
 See the home page for installation, usage, documentation, changelog
 and configuration walkthroughs.
 
-  * http://rclone.org/
+  * https://rclone.org/
 
 License
 -------

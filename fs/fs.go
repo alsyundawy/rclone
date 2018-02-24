@@ -3,13 +3,19 @@ package fs
 
 import (
 	"io"
+	"io/ioutil"
 	"log"
 	"math"
+	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/ncw/rclone/fs/driveletter"
+	"github.com/ncw/rclone/fs/hash"
 	"github.com/pkg/errors"
 )
 
@@ -24,26 +30,30 @@ const (
 
 // Globals
 var (
-	// UserAgent set in the default Transport
-	UserAgent = "rclone/" + Version
 	// Filesystem registry
-	fsRegistry []*RegInfo
+	Registry []*RegInfo
 	// ErrorNotFoundInConfigFile is returned by NewFs if not found in config file
-	ErrorNotFoundInConfigFile = errors.New("didn't find section in config file")
-	ErrorCantPurge            = errors.New("can't purge directory")
-	ErrorCantCopy             = errors.New("can't copy object - incompatible remotes")
-	ErrorCantMove             = errors.New("can't move object - incompatible remotes")
-	ErrorCantDirMove          = errors.New("can't move directory - incompatible remotes")
-	ErrorDirExists            = errors.New("can't copy directory - destination already exists")
-	ErrorCantSetModTime       = errors.New("can't set modified time")
-	ErrorDirNotFound          = errors.New("directory not found")
-	ErrorObjectNotFound       = errors.New("object not found")
-	ErrorLevelNotSupported    = errors.New("level value not supported")
-	ErrorListAborted          = errors.New("list aborted")
-	ErrorListOnlyRoot         = errors.New("can only list from root")
-	ErrorIsFile               = errors.New("is a file not a directory")
-	ErrorNotDeleting          = errors.New("not deleting files as there were IO errors")
-	ErrorCantMoveOverlapping  = errors.New("can't move files on overlapping remotes")
+	ErrorNotFoundInConfigFile        = errors.New("didn't find section in config file")
+	ErrorCantPurge                   = errors.New("can't purge directory")
+	ErrorCantCopy                    = errors.New("can't copy object - incompatible remotes")
+	ErrorCantMove                    = errors.New("can't move object - incompatible remotes")
+	ErrorCantDirMove                 = errors.New("can't move directory - incompatible remotes")
+	ErrorDirExists                   = errors.New("can't copy directory - destination already exists")
+	ErrorCantSetModTime              = errors.New("can't set modified time")
+	ErrorCantSetModTimeWithoutDelete = errors.New("can't set modified time without deleting existing object")
+	ErrorDirNotFound                 = errors.New("directory not found")
+	ErrorObjectNotFound              = errors.New("object not found")
+	ErrorLevelNotSupported           = errors.New("level value not supported")
+	ErrorListAborted                 = errors.New("list aborted")
+	ErrorListBucketRequired          = errors.New("bucket or container name is needed in remote")
+	ErrorIsFile                      = errors.New("is a file not a directory")
+	ErrorNotAFile                    = errors.New("is a not a regular file")
+	ErrorNotDeleting                 = errors.New("not deleting files as there were IO errors")
+	ErrorNotDeletingDirs             = errors.New("not deleting directories as there were IO errors")
+	ErrorCantMoveOverlapping         = errors.New("can't move files on overlapping remotes")
+	ErrorDirectoryNotEmpty           = errors.New("directory not empty")
+	ErrorImmutableModified           = errors.New("immutable file modified")
+	ErrorPermissionDenied            = errors.New("permission denied")
 )
 
 // RegInfo provides information about a filesystem
@@ -55,9 +65,9 @@ type RegInfo struct {
 	// Create a new file system.  If root refers to an existing
 	// object, then it should return a Fs which which points to
 	// the parent of that object and ErrorIsFile.
-	NewFs func(name string, root string) (Fs, error)
+	NewFs func(name string, root string) (Fs, error) `json:"-"`
 	// Function to call to help with config
-	Config func(string)
+	Config func(string) `json:"-"`
 	// Options for the Fs configuration
 	Options []Option
 }
@@ -68,7 +78,7 @@ type Option struct {
 	Help       string
 	Optional   bool
 	IsPassword bool
-	Examples   OptionExamples
+	Examples   OptionExamples `json:",omitempty"`
 }
 
 // OptionExamples is a slice of examples
@@ -96,39 +106,34 @@ type OptionExample struct {
 //
 // Fs modules  should use this in an init() function
 func Register(info *RegInfo) {
-	fsRegistry = append(fsRegistry, info)
-}
-
-// ListFser is the interface for listing a remote Fs
-type ListFser interface {
-	// List the objects and directories of the Fs starting from dir
-	//
-	// dir should be "" to start from the root, and should not
-	// have trailing slashes.
-	//
-	// This should return ErrDirNotFound (using out.SetError())
-	// if the directory isn't found.
-	//
-	// Fses must support recursion levels of fs.MaxLevel and 1.
-	// They may return ErrorLevelNotSupported otherwise.
-	List(out ListOpts, dir string)
-
-	// NewObject finds the Object at remote.  If it can't be found
-	// it returns the error ErrorObjectNotFound.
-	NewObject(remote string) (Object, error)
+	Registry = append(Registry, info)
 }
 
 // Fs is the interface a cloud storage system must provide
 type Fs interface {
 	Info
-	ListFser
+
+	// List the objects and directories in dir into entries.  The
+	// entries can be returned in any order but should be for a
+	// complete directory.
+	//
+	// dir should be "" to list the root, and should not have
+	// trailing slashes.
+	//
+	// This should return ErrDirNotFound if the directory isn't
+	// found.
+	List(dir string) (entries DirEntries, err error)
+
+	// NewObject finds the Object at remote.  If it can't be found
+	// it returns the error ErrorObjectNotFound.
+	NewObject(remote string) (Object, error)
 
 	// Put in to the remote path with the modTime given of the given size
 	//
 	// May create the object even if it returns an error - if so
 	// will return the object and the error, otherwise will return
 	// nil and the error
-	Put(in io.Reader, src ObjectInfo) (Object, error)
+	Put(in io.Reader, src ObjectInfo, options ...OpenOption) (Object, error)
 
 	// Mkdir makes the directory (container, bucket)
 	//
@@ -141,7 +146,7 @@ type Fs interface {
 	Rmdir(dir string) error
 }
 
-// Info provides an interface to reading information about a filesystem.
+// Info provides a read only interface to information about a filesystem.
 type Info interface {
 	// Name of the remote (as passed into NewFs)
 	Name() string
@@ -156,7 +161,7 @@ type Info interface {
 	Precision() time.Duration
 
 	// Returns the supported hash types of the filesystem
-	Hashes() HashSet
+	Hashes() hash.Set
 
 	// Features returns the optional features of this Fs
 	Features() *Features
@@ -173,30 +178,31 @@ type Object interface {
 	Open(options ...OpenOption) (io.ReadCloser, error)
 
 	// Update in to the object with the modTime given of the given size
-	Update(in io.Reader, src ObjectInfo) error
+	Update(in io.Reader, src ObjectInfo, options ...OpenOption) error
 
 	// Removes this object
 	Remove() error
 }
 
-// ObjectInfo contains information about an object.
+// ObjectInfo provides read only information about an object.
 type ObjectInfo interface {
-	BasicInfo
+	DirEntry
 
 	// Fs returns read only access to the Fs that this object is part of
 	Fs() Info
 
 	// Hash returns the selected checksum of the file
 	// If no checksum is available it returns ""
-	Hash(HashType) (string, error)
+	Hash(hash.Type) (string, error)
 
 	// Storable says whether this object can be stored
 	Storable() bool
 }
 
-// BasicInfo common interface for Dir and Object providing the very
-// basic attributes of an object.
-type BasicInfo interface {
+// DirEntry provides read only information about the common subset of
+// a Dir or Object.  These are returned from directory listings - type
+// assert them into the correct type.
+type DirEntry interface {
 	// String returns a description of the Object
 	String() string
 
@@ -211,6 +217,19 @@ type BasicInfo interface {
 	Size() int64
 }
 
+// Directory is a filesystem like directory provided by an Fs
+type Directory interface {
+	DirEntry
+
+	// Items returns the count of items in this directory or this
+	// directory and subdirectories if known, -1 for unknown
+	Items() int64
+
+	// ID returns the internal ID of this directory if known, or
+	// "" otherwise
+	ID() string
+}
+
 // MimeTyper is an optional interface for Object
 type MimeTyper interface {
 	// MimeType returns the content type of the Object if
@@ -218,13 +237,31 @@ type MimeTyper interface {
 	MimeType() string
 }
 
+// ObjectUnWrapper is an optional interface for Object
+type ObjectUnWrapper interface {
+	// UnWrap returns the Object that this Object is wrapping or
+	// nil if it isn't wrapping anything
+	UnWrap() Object
+}
+
+// ListRCallback defines a callback function for ListR to use
+//
+// It is called for each tranche of entries read from the listing and
+// if it returns an error, the listing stops.
+type ListRCallback func(entries DirEntries) error
+
+// ListRFn is defines the call used to recursively list a directory
+type ListRFn func(dir string, callback ListRCallback) error
+
 // Features describe the optional features of the Fs
 type Features struct {
-	// Feature flags
-	CaseInsensitive bool
-	DuplicateFiles  bool
-	ReadMimeType    bool
-	WriteMimeType   bool
+	// Feature flags, whether Fs
+	CaseInsensitive         bool // has case insensitive files
+	DuplicateFiles          bool // allows duplicate files
+	ReadMimeType            bool // can read the mime type of objects
+	WriteMimeType           bool // can set the mime type of objects
+	CanHaveEmptyDirectories bool // can have empty directories
+	BucketBased             bool // is bucket based (like s3, swift etc)
 
 	// Purge all files in the root and the root directory
 	//
@@ -266,8 +303,19 @@ type Features struct {
 	// If destination exists then return fs.ErrorDirExists
 	DirMove func(src Fs, srcRemote, dstRemote string) error
 
+	// DirChangeNotify calls the passed function with a path
+	// of a directory that has had changes. If the implementation
+	// uses polling, it should adhere to the given interval.
+	DirChangeNotify func(func(string), time.Duration) chan bool
+
 	// UnWrap returns the Fs that this Fs is wrapping
 	UnWrap func() Fs
+
+	// WrapFs returns the Fs that is wrapping this Fs
+	WrapFs func() Fs
+
+	// SetWrapper sets the Fs that is wrapping this Fs
+	SetWrapper func(f Fs)
 
 	// DirCacheFlush resets the directory cache - used in testing
 	// as an optional interface
@@ -281,13 +329,82 @@ type Features struct {
 	//
 	// May create duplicates or return errors if src already
 	// exists.
-	PutUnchecked func(in io.Reader, src ObjectInfo) (Object, error)
+	PutUnchecked func(in io.Reader, src ObjectInfo, options ...OpenOption) (Object, error)
+
+	// PutStream uploads to the remote path with the modTime given of indeterminate size
+	//
+	// May create the object even if it returns an error - if so
+	// will return the object and the error, otherwise will return
+	// nil and the error
+	PutStream func(in io.Reader, src ObjectInfo, options ...OpenOption) (Object, error)
+
+	// MergeDirs merges the contents of all the directories passed
+	// in into the first one and rmdirs the other directories.
+	MergeDirs func([]Directory) error
 
 	// CleanUp the trash in the Fs
 	//
 	// Implement this if you have a way of emptying the trash or
 	// otherwise cleaning up old versions of files.
 	CleanUp func() error
+
+	// ListR lists the objects and directories of the Fs starting
+	// from dir recursively into out.
+	//
+	// dir should be "" to start from the root, and should not
+	// have trailing slashes.
+	//
+	// This should return ErrDirNotFound if the directory isn't
+	// found.
+	//
+	// It should call callback for each tranche of entries read.
+	// These need not be returned in any particular order.  If
+	// callback returns an error then the listing will stop
+	// immediately.
+	//
+	// Don't implement this unless you have a more efficient way
+	// of listing recursively that doing a directory traversal.
+	ListR ListRFn
+}
+
+// Disable nil's out the named feature.  If it isn't found then it
+// will log a message.
+func (ft *Features) Disable(name string) *Features {
+	v := reflect.ValueOf(ft).Elem()
+	vType := v.Type()
+	for i := 0; i < v.NumField(); i++ {
+		vName := vType.Field(i).Name
+		field := v.Field(i)
+		if strings.EqualFold(name, vName) {
+			if !field.CanSet() {
+				Errorf(nil, "Can't set Feature %q", name)
+			} else {
+				zero := reflect.Zero(field.Type())
+				field.Set(zero)
+				Debugf(nil, "Reset feature %q", name)
+			}
+		}
+	}
+	return ft
+}
+
+// List returns a slice of all the possible feature names
+func (ft *Features) List() (out []string) {
+	v := reflect.ValueOf(ft).Elem()
+	vType := v.Type()
+	for i := 0; i < v.NumField(); i++ {
+		out = append(out, vType.Field(i).Name)
+	}
+	return out
+}
+
+// DisableList nil's out the comma separated list of named features.
+// If it isn't found then it will log a message.
+func (ft *Features) DisableList(list []string) *Features {
+	for _, feature := range list {
+		ft.Disable(strings.TrimSpace(feature))
+	}
+	return ft
 }
 
 // Fill fills in the function pointers in the Features struct from the
@@ -306,8 +423,15 @@ func (ft *Features) Fill(f Fs) *Features {
 	if do, ok := f.(DirMover); ok {
 		ft.DirMove = do.DirMove
 	}
+	if do, ok := f.(DirChangeNotifier); ok {
+		ft.DirChangeNotify = do.DirChangeNotify
+	}
 	if do, ok := f.(UnWrapper); ok {
 		ft.UnWrap = do.UnWrap
+	}
+	if do, ok := f.(Wrapper); ok {
+		ft.WrapFs = do.WrapFs
+		ft.SetWrapper = do.SetWrapper
 	}
 	if do, ok := f.(DirCacheFlusher); ok {
 		ft.DirCacheFlush = do.DirCacheFlush
@@ -315,17 +439,26 @@ func (ft *Features) Fill(f Fs) *Features {
 	if do, ok := f.(PutUncheckeder); ok {
 		ft.PutUnchecked = do.PutUnchecked
 	}
+	if do, ok := f.(PutStreamer); ok {
+		ft.PutStream = do.PutStream
+	}
+	if do, ok := f.(MergeDirser); ok {
+		ft.MergeDirs = do.MergeDirs
+	}
 	if do, ok := f.(CleanUpper); ok {
 		ft.CleanUp = do.CleanUp
 	}
-	return ft
+	if do, ok := f.(ListRer); ok {
+		ft.ListR = do.ListR
+	}
+	return ft.DisableList(Config.DisableFeatures)
 }
 
 // Mask the Features with the Fs passed in
 //
 // Only optional features which are implemented in both the original
 // Fs AND the one passed in will be advertised.  Any features which
-// aren't in both will be set to false/nil, except for UnWrap which
+// aren't in both will be set to false/nil, except for UnWrap/Wrap which
 // will be left untouched.
 func (ft *Features) Mask(f Fs) *Features {
 	mask := f.Features()
@@ -333,6 +466,8 @@ func (ft *Features) Mask(f Fs) *Features {
 	ft.DuplicateFiles = ft.DuplicateFiles && mask.DuplicateFiles
 	ft.ReadMimeType = ft.ReadMimeType && mask.ReadMimeType
 	ft.WriteMimeType = ft.WriteMimeType && mask.WriteMimeType
+	ft.CanHaveEmptyDirectories = ft.CanHaveEmptyDirectories && mask.CanHaveEmptyDirectories
+	ft.BucketBased = ft.BucketBased && mask.BucketBased
 	if mask.Purge == nil {
 		ft.Purge = nil
 	}
@@ -345,6 +480,9 @@ func (ft *Features) Mask(f Fs) *Features {
 	if mask.DirMove == nil {
 		ft.DirMove = nil
 	}
+	if mask.DirChangeNotify == nil {
+		ft.DirChangeNotify = nil
+	}
 	// if mask.UnWrap == nil {
 	// 	ft.UnWrap = nil
 	// }
@@ -354,13 +492,22 @@ func (ft *Features) Mask(f Fs) *Features {
 	if mask.PutUnchecked == nil {
 		ft.PutUnchecked = nil
 	}
+	if mask.PutStream == nil {
+		ft.PutStream = nil
+	}
+	if mask.MergeDirs == nil {
+		ft.MergeDirs = nil
+	}
 	if mask.CleanUp == nil {
 		ft.CleanUp = nil
 	}
-	return ft
+	if mask.ListR == nil {
+		ft.ListR = nil
+	}
+	return ft.DisableList(Config.DisableFeatures)
 }
 
-// Wrap makes a Copy of the features passed in, overriding the UnWrap
+// Wrap makes a Copy of the features passed in, overriding the UnWrap/Wrap
 // method only if available in f.
 func (ft *Features) Wrap(f Fs) *Features {
 	copy := new(Features)
@@ -368,7 +515,20 @@ func (ft *Features) Wrap(f Fs) *Features {
 	if do, ok := f.(UnWrapper); ok {
 		copy.UnWrap = do.UnWrap
 	}
+	if do, ok := f.(Wrapper); ok {
+		copy.WrapFs = do.WrapFs
+		copy.SetWrapper = do.SetWrapper
+	}
 	return copy
+}
+
+// WrapsFs adds extra information between `f` which wraps `w`
+func (ft *Features) WrapsFs(f Fs, w Fs) *Features {
+	wFeatures := w.Features()
+	if wFeatures.WrapFs != nil && wFeatures.SetWrapper != nil {
+		wFeatures.SetWrapper(f)
+	}
+	return ft
 }
 
 // Purger is an optional interfaces for Fs
@@ -423,10 +583,26 @@ type DirMover interface {
 	DirMove(src Fs, srcRemote, dstRemote string) error
 }
 
+// DirChangeNotifier is an optional interface for Fs
+type DirChangeNotifier interface {
+	// DirChangeNotify calls the passed function with a path
+	// of a directory that has had changes. If the implementation
+	// uses polling, it should adhere to the given interval.
+	DirChangeNotify(func(string), time.Duration) chan bool
+}
+
 // UnWrapper is an optional interfaces for Fs
 type UnWrapper interface {
 	// UnWrap returns the Fs that this Fs is wrapping
 	UnWrap() Fs
+}
+
+// Wrapper is an optional interfaces for Fs
+type Wrapper interface {
+	// Wrap returns the Fs that is wrapping this Fs
+	WrapFs() Fs
+	// SetWrapper sets the Fs that is wrapping this Fs
+	SetWrapper(f Fs)
 }
 
 // DirCacheFlusher is an optional interface for Fs
@@ -446,7 +622,24 @@ type PutUncheckeder interface {
 	//
 	// May create duplicates or return errors if src already
 	// exists.
-	PutUnchecked(in io.Reader, src ObjectInfo) (Object, error)
+	PutUnchecked(in io.Reader, src ObjectInfo, options ...OpenOption) (Object, error)
+}
+
+// PutStreamer is an optional interface for Fs
+type PutStreamer interface {
+	// PutStream uploads to the remote path with the modTime given of indeterminate size
+	//
+	// May create the object even if it returns an error - if so
+	// will return the object and the error, otherwise will return
+	// nil and the error
+	PutStream(in io.Reader, src ObjectInfo, options ...OpenOption) (Object, error)
+}
+
+// MergeDirser is an option interface for Fs
+type MergeDirser interface {
+	// MergeDirs merges the contents of all the directories passed
+	// in into the first one and rmdirs the other directories.
+	MergeDirs([]Directory) error
 }
 
 // CleanUpper is an optional interfaces for Fs
@@ -458,45 +651,42 @@ type CleanUpper interface {
 	CleanUp() error
 }
 
+// ListRer is an optional interfaces for Fs
+type ListRer interface {
+	// ListR lists the objects and directories of the Fs starting
+	// from dir recursively into out.
+	//
+	// dir should be "" to start from the root, and should not
+	// have trailing slashes.
+	//
+	// This should return ErrDirNotFound if the directory isn't
+	// found.
+	//
+	// It should call callback for each tranche of entries read.
+	// These need not be returned in any particular order.  If
+	// callback returns an error then the listing will stop
+	// immediately.
+	//
+	// Don't implement this unless you have a more efficient way
+	// of listing recursively that doing a directory traversal.
+	ListR(dir string, callback ListRCallback) error
+}
+
+// RangeSeeker is the interface that wraps the RangeSeek method.
+//
+// Some of the returns from Object.Open() may optionally implement
+// this method for efficiency purposes.
+type RangeSeeker interface {
+	// RangeSeek behaves like a call to Seek(offset int64, whence
+	// int) with the output wrapped in an io.LimitedReader
+	// limiting the total length to limit.
+	//
+	// RangeSeek with a limit of < 0 is equivalent to a regular Seek.
+	RangeSeek(offset int64, whence int, length int64) (int64, error)
+}
+
 // ObjectsChan is a channel of Objects
 type ObjectsChan chan Object
-
-// ListOpts describes the interface used for Fs.List operations
-type ListOpts interface {
-	// Add an object to the output.
-	// If the function returns true, the operation has been aborted.
-	// Multiple goroutines can safely add objects concurrently.
-	Add(obj Object) (abort bool)
-
-	// Add a directory to the output.
-	// If the function returns true, the operation has been aborted.
-	// Multiple goroutines can safely add objects concurrently.
-	AddDir(dir *Dir) (abort bool)
-
-	// IncludeDirectory returns whether this directory should be
-	// included in the listing (and recursed into or not).
-	IncludeDirectory(remote string) bool
-
-	// SetError will set an error state, and will cause the listing to
-	// be aborted.
-	// Multiple goroutines can set the error state concurrently,
-	// but only the first will be returned to the caller.
-	SetError(err error)
-
-	// Level returns the level it should recurse to.  Fses may
-	// ignore this in which case the listing will be less
-	// efficient.
-	Level() int
-
-	// Buffer returns the channel depth in use
-	Buffer() int
-
-	// Finished should be called when listing is finished
-	Finished()
-
-	// IsFinished returns whether Finished or SetError have been called
-	IsFinished() bool
-}
 
 // Objects is a slice of Object~s
 type Objects []Object
@@ -504,55 +694,17 @@ type Objects []Object
 // ObjectPair is a pair of Objects used to describe a potential copy
 // operation.
 type ObjectPair struct {
-	src, dst Object
+	Src, Dst Object
 }
 
 // ObjectPairChan is a channel of ObjectPair
 type ObjectPairChan chan ObjectPair
 
-// Dir describes a directory for directory/container/bucket lists
-type Dir struct {
-	Name  string    // name of the directory
-	When  time.Time // modification or creation time - IsZero for unknown
-	Bytes int64     // size of directory and contents -1 for unknown
-	Count int64     // number of objects -1 for unknown
-}
-
-// String returns the name
-func (d *Dir) String() string {
-	return d.Name
-}
-
-// Remote returns the remote path
-func (d *Dir) Remote() string {
-	return d.Name
-}
-
-// ModTime returns the modification date of the file
-// It should return a best guess if one isn't available
-func (d *Dir) ModTime() time.Time {
-	if !d.When.IsZero() {
-		return d.When
-	}
-	return time.Now()
-}
-
-// Size returns the size of the file
-func (d *Dir) Size() int64 {
-	return d.Bytes
-}
-
-// Check interface
-var _ BasicInfo = (*Dir)(nil)
-
-// DirChan is a channel of Dir objects
-type DirChan chan *Dir
-
 // Find looks for an Info object for the name passed in
 //
 // Services are looked up in the config file
 func Find(name string) (*RegInfo, error) {
-	for _, item := range fsRegistry {
+	for _, item := range Registry {
 		if item.Name == name {
 			return item, nil
 		}
@@ -573,16 +725,16 @@ func MustFind(name string) *RegInfo {
 	return fs
 }
 
-// Pattern to match an rclone url
-var matcher = regexp.MustCompile(`^([\w_ -]+):(.*)$`)
+// Matcher is a pattern to match an rclone URL
+var Matcher = regexp.MustCompile(`^([\w_ -]+):(.*)$`)
 
 // ParseRemote deconstructs a path into configName, fsPath, looking up
 // the fsName in the config file (returning NotFoundInConfigFile if not found)
 func ParseRemote(path string) (fsInfo *RegInfo, configName, fsPath string, err error) {
-	parts := matcher.FindStringSubmatch(path)
+	parts := Matcher.FindStringSubmatch(path)
 	var fsName string
 	fsName, configName, fsPath = "local", "local", path
-	if parts != nil && !isDriveLetter(parts[1]) {
+	if parts != nil && !driveletter.IsDriveLetter(parts[1]) {
 		configName, fsPath = parts[1], parts[2]
 		fsName = ConfigFileGet(configName, "type")
 		if fsName == "" {
@@ -612,6 +764,21 @@ func NewFs(path string) (Fs, error) {
 	return fsInfo.NewFs(configName, fsPath)
 }
 
+// TemporaryLocalFs creates a local FS in the OS's temporary directory.
+//
+// No cleanup is performed, the caller must call Purge on the Fs themselves.
+func TemporaryLocalFs() (Fs, error) {
+	path, err := ioutil.TempDir("", "rclone-spool")
+	if err == nil {
+		err = os.Remove(path)
+	}
+	if err != nil {
+		return nil, err
+	}
+	path = filepath.ToSlash(path)
+	return NewFs(path)
+}
+
 // CheckClose is a utility function used to check the return from
 // Close in a defer statement.
 func CheckClose(c io.Closer, err *error) {
@@ -621,49 +788,36 @@ func CheckClose(c io.Closer, err *error) {
 	}
 }
 
-// NewStaticObjectInfo returns a static ObjectInfo
-// If hashes is nil and fs is not nil, the hash map will be replaced with
-// empty hashes of the types supported by the fs.
-func NewStaticObjectInfo(remote string, modTime time.Time, size int64, storable bool, hashes map[HashType]string, fs Info) ObjectInfo {
-	info := &staticObjectInfo{
-		remote:   remote,
-		modTime:  modTime,
-		size:     size,
-		storable: storable,
-		hashes:   hashes,
-		fs:       fs,
+// FileExists returns true if a file remote exists.
+// If remote is a directory, FileExists returns false.
+func FileExists(fs Fs, remote string) (bool, error) {
+	_, err := fs.NewObject(remote)
+	if err != nil {
+		if err == ErrorObjectNotFound || err == ErrorNotAFile || err == ErrorPermissionDenied {
+			return false, nil
+		}
+		return false, err
 	}
-	if fs != nil && hashes == nil {
-		set := fs.Hashes().Array()
-		info.hashes = make(map[HashType]string)
-		for _, ht := range set {
-			info.hashes[ht] = ""
+	return true, nil
+}
+
+// CalculateModifyWindow works out modify window for Fses passed in -
+// sets Config.ModifyWindow
+//
+// This is the largest modify window of all the fses in use, and the
+// user configured value
+func CalculateModifyWindow(fss ...Fs) {
+	for _, f := range fss {
+		if f != nil {
+			precision := f.Precision()
+			if precision > Config.ModifyWindow {
+				Config.ModifyWindow = precision
+			}
+			if precision == ModTimeNotSupported {
+				Infof(f, "Modify window not supported")
+				return
+			}
 		}
 	}
-	return info
-}
-
-type staticObjectInfo struct {
-	remote   string
-	modTime  time.Time
-	size     int64
-	storable bool
-	hashes   map[HashType]string
-	fs       Info
-}
-
-func (i *staticObjectInfo) Fs() Info           { return i.fs }
-func (i *staticObjectInfo) Remote() string     { return i.remote }
-func (i *staticObjectInfo) String() string     { return i.remote }
-func (i *staticObjectInfo) ModTime() time.Time { return i.modTime }
-func (i *staticObjectInfo) Size() int64        { return i.size }
-func (i *staticObjectInfo) Storable() bool     { return i.storable }
-func (i *staticObjectInfo) Hash(h HashType) (string, error) {
-	if len(i.hashes) == 0 {
-		return "", ErrHashUnsupported
-	}
-	if hash, ok := i.hashes[h]; ok {
-		return hash, nil
-	}
-	return "", ErrHashUnsupported
+	Infof(fss[0], "Modify window is %s", Config.ModifyWindow)
 }

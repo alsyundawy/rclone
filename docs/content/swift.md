@@ -7,11 +7,14 @@ date: "2014-04-26"
 <i class="fa fa-space-shuttle"></i>Swift
 ----------------------------------------
 
-Swift refers to [Openstack Object Storage](http://www.openstack.org/software/openstack-storage/).
+Swift refers to [Openstack Object Storage](https://docs.openstack.org/swift/latest/).
 Commercial implementations of that being:
 
-  * [Rackspace Cloud Files](http://www.rackspace.com/cloud/files/)
-  * [Memset Memstore](http://www.memset.com/cloud/storage/)
+  * [Rackspace Cloud Files](https://www.rackspace.com/cloud/files/)
+  * [Memset Memstore](https://www.memset.com/cloud/storage/)
+  * [OVH Object Storage](https://www.ovh.co.uk/public-cloud/storage/object-storage/)
+  * [Oracle Cloud Storage](https://cloud.oracle.com/storage-opc)
+  * [IBM Bluemix Cloud ObjectStorage Swift](https://console.bluemix.net/docs/infrastructure/objectstorage-swift/index.html)
 
 Paths are specified as `remote:container` (or `remote:` for the `lsd`
 command.)  You may put subdirectories in too, eg `remote:container/path/to/dir`.
@@ -26,7 +29,8 @@ This will guide you through an interactive setup process.
 No remotes found - make a new one
 n) New remote
 s) Set configuration password
-n/s> n
+q) Quit config
+n/s/q> n
 name> remote
 Type of storage to configure.
 Choose a number from below, or type in your own value
@@ -36,30 +40,55 @@ Choose a number from below, or type in your own value
    \ "s3"
  3 / Backblaze B2
    \ "b2"
- 4 / Dropbox
+ 4 / Box
+   \ "box"
+ 5 / Cache a remote
+   \ "cache"
+ 6 / Dropbox
    \ "dropbox"
- 5 / Encrypt/Decrypt a remote
+ 7 / Encrypt/Decrypt a remote
    \ "crypt"
- 6 / Google Cloud Storage (this is not Google Drive)
+ 8 / FTP Connection
+   \ "ftp"
+ 9 / Google Cloud Storage (this is not Google Drive)
    \ "google cloud storage"
- 7 / Google Drive
+10 / Google Drive
    \ "drive"
- 8 / Hubic
+11 / Hubic
    \ "hubic"
- 9 / Local Disk
+12 / Local Disk
    \ "local"
-10 / Microsoft OneDrive
+13 / Microsoft Azure Blob Storage
+   \ "azureblob"
+14 / Microsoft OneDrive
    \ "onedrive"
-11 / Openstack Swift (Rackspace Cloud Files, Memset Memstore, OVH)
+15 / Openstack Swift (Rackspace Cloud Files, Memset Memstore, OVH)
    \ "swift"
-12 / Yandex Disk
+16 / Pcloud
+   \ "pcloud"
+17 / QingCloud Object Storage
+   \ "qingstor"
+18 / SSH/SFTP Connection
+   \ "sftp"
+19 / Webdav
+   \ "webdav"
+20 / Yandex Disk
    \ "yandex"
-Storage> 11
-User name to log in.
-user> user_name
-API key or password.
-key> password_or_api_key
-Authentication URL for server.
+21 / http Connection
+   \ "http"
+Storage> swift
+Get swift credentials from environment variables in standard OpenStack form.
+Choose a number from below, or type in your own value
+ 1 / Enter swift credentials in the next step
+   \ "false"
+ 2 / Get swift credentials from environment vars. Leave other fields blank if using this.
+   \ "true"
+env_auth> true
+User name to log in (OS_USERNAME).
+user> 
+API key or password (OS_PASSWORD).
+key> 
+Authentication URL for server (OS_AUTH_URL).
 Choose a number from below, or type in your own value
  1 / Rackspace US
    \ "https://auth.api.rackspacecloud.com/v1.0"
@@ -73,31 +102,51 @@ Choose a number from below, or type in your own value
    \ "https://auth.storage.memset.com/v2.0"
  6 / OVH
    \ "https://auth.cloud.ovh.net/v2.0"
-auth> 1
-User domain - optional (v3 auth)
-domain> Default
-Tenant name - optional for v1 auth, required otherwise
-tenant> tenant_name
-Tenant domain - optional (v3 auth)
-tenant_domain>
-Region name - optional
-region>
-Storage URL - optional
-storage_url>
-AuthVersion - optional - set to (1,2,3) if your auth URL has no version
-auth_version>
+auth> 
+User ID to log in - optional - most swift systems use user and leave this blank (v3 auth) (OS_USER_ID).
+user_id> 
+User domain - optional (v3 auth) (OS_USER_DOMAIN_NAME)
+domain> 
+Tenant name - optional for v1 auth, this or tenant_id required otherwise (OS_TENANT_NAME or OS_PROJECT_NAME)
+tenant> 
+Tenant ID - optional for v1 auth, this or tenant required otherwise (OS_TENANT_ID)
+tenant_id> 
+Tenant domain - optional (v3 auth) (OS_PROJECT_DOMAIN_NAME)
+tenant_domain> 
+Region name - optional (OS_REGION_NAME)
+region> 
+Storage URL - optional (OS_STORAGE_URL)
+storage_url> 
+Auth Token from alternate authentication - optional (OS_AUTH_TOKEN)
+auth_token> 
+AuthVersion - optional - set to (1,2,3) if your auth URL has no version (ST_AUTH_VERSION)
+auth_version> 
+Endpoint type to choose from the service catalogue (OS_ENDPOINT_TYPE)
+Choose a number from below, or type in your own value
+ 1 / Public (default, choose this if not sure)
+   \ "public"
+ 2 / Internal (use internal service net)
+   \ "internal"
+ 3 / Admin
+   \ "admin"
+endpoint_type> 
 Remote config
 --------------------
-[remote]
-user = user_name
-key = password_or_api_key
-auth = https://auth.api.rackspacecloud.com/v1.0
-domain = Default
-tenant =
-tenant_domain =
-region =
-storage_url =
-auth_version =
+[test]
+env_auth = true
+user = 
+key = 
+auth = 
+user_id = 
+domain = 
+tenant = 
+tenant_id = 
+tenant_domain = 
+region = 
+storage_url = 
+auth_token = 
+auth_version = 
+endpoint_type = 
 --------------------
 y) Yes this is OK
 e) Edit this remote
@@ -155,6 +204,49 @@ tenant = $OS_TENANT_NAME
 ```
 
 Note that you may (or may not) need to set `region` too - try without first.
+
+### Configuration from the environment ###
+
+If you prefer you can configure rclone to use swift using a standard
+set of OpenStack environment variables.
+
+When you run through the config, make sure you choose `true` for
+`env_auth` and leave everything else blank.
+
+rclone will then set any empty config parameters from the environment
+using standard OpenStack environment variables.  There is [a list of
+the
+variables](https://godoc.org/github.com/ncw/swift#Connection.ApplyEnvironment)
+in the docs for the swift library.
+
+### Using an alternate authentication method ###
+
+If your OpenStack installation uses a non-standard authentication method
+that might not be yet supported by rclone or the underlying swift library, 
+you can authenticate externally (e.g. calling manually the `openstack` 
+commands to get a token). Then, you just need to pass the two 
+configuration variables ``auth_token`` and ``storage_url``. 
+If they are both provided, the other variables are ignored. rclone will 
+not try to authenticate but instead assume it is already authenticated 
+and use these two variables to access the OpenStack installation.
+
+#### Using rclone without a config file ####
+
+You can use rclone with swift without a config file, if desired, like
+this:
+
+```
+source openstack-credentials-file
+export RCLONE_CONFIG_MYREMOTE_TYPE=swift
+export RCLONE_CONFIG_MYREMOTE_ENV_AUTH=true
+rclone lsd myremote:
+```
+
+### --fast-list ###
+
+This remote supports `--fast-list` which allows you to use fewer
+transactions in exchange for more memory. See the [rclone
+docs](/docs/#fast-list) for more details.
 
 ### Specific options ###
 

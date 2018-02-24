@@ -15,23 +15,20 @@ installations.
 
 Paths are specified as `remote:path`. If the path does not begin with
 a `/` it is relative to the home directory of the user.  An empty path
-`remote:` refers to the users home directory.
+`remote:` refers to the user's home directory.
 
-Here is an example of making a SFTP configuration.  First run
+Here is an example of making an SFTP configuration.  First run
 
     rclone config
 
-This will guide you through an interactive setup process.  You will
-need your account number (a short hex number) and key (a long hex
-number) which you can get from the SFTP control panel.
+This will guide you through an interactive setup process.
+
 ```
 No remotes found - make a new one
 n) New remote
-r) Rename remote
-c) Copy remote
 s) Set configuration password
 q) Quit config
-n/r/c/s/q> n
+n/s/q> n
 name> remote
 Type of storage to configure.
 Choose a number from below, or type in your own value
@@ -45,44 +42,51 @@ Choose a number from below, or type in your own value
    \ "dropbox"
  5 / Encrypt/Decrypt a remote
    \ "crypt"
- 6 / Google Cloud Storage (this is not Google Drive)
+ 6 / FTP Connection
+   \ "ftp"
+ 7 / Google Cloud Storage (this is not Google Drive)
    \ "google cloud storage"
- 7 / Google Drive
+ 8 / Google Drive
    \ "drive"
- 8 / Hubic
+ 9 / Hubic
    \ "hubic"
- 9 / Local Disk
+10 / Local Disk
    \ "local"
-10 / Microsoft OneDrive
+11 / Microsoft OneDrive
    \ "onedrive"
-11 / Openstack Swift (Rackspace Cloud Files, Memset Memstore, OVH)
+12 / Openstack Swift (Rackspace Cloud Files, Memset Memstore, OVH)
    \ "swift"
-12 / SSH/SFTP Connection
+13 / SSH/SFTP Connection
    \ "sftp"
-13 / Yandex Disk
+14 / Yandex Disk
    \ "yandex"
-Storage> 12  
+15 / http Connection
+   \ "http"
+Storage> sftp
 SSH host to connect to
 Choose a number from below, or type in your own value
  1 / Connect to example.com
    \ "example.com"
 host> example.com
 SSH username, leave blank for current username, ncw
-user> 
-SSH port
+user> sftpuser
+SSH port, leave blank to use default (22)
 port> 
-SSH password, leave blank to use ssh-agent
+SSH password, leave blank to use ssh-agent.
 y) Yes type in my own password
 g) Generate random password
 n) No leave this optional password blank
 y/g/n> n
+Path to unencrypted PEM-encoded private key file, leave blank to use ssh-agent.
+key_file> 
 Remote config
 --------------------
 [remote]
 host = example.com
-user = 
+user = sftpuser
 port = 
 pass = 
+key_file = 
 --------------------
 y) Yes this is OK
 e) Edit this remote
@@ -90,7 +94,7 @@ d) Delete this remote
 y/e/d> y
 ```
 
-This remote is called `remote` and can now be used like this
+This remote is called `remote` and can now be used like this:
 
 See all directories in the home directory
 
@@ -109,15 +113,62 @@ excess files in the directory.
 
     rclone sync /home/local/directory remote:directory
 
+### SSH Authentication ###
+
+The SFTP remote supports three authentication methods:
+
+  * Password
+  * Key file
+  * ssh-agent
+
+Key files should be unencrypted PEM-encoded private key files.  For
+instance `/home/$USER/.ssh/id_rsa`.
+
+If you don't specify `pass` or `key_file` then rclone will attempt to
+contact an ssh-agent.
+
+### ssh-agent on macOS ###
+
+Note that there seem to be various problems with using an ssh-agent on
+macOS due to recent changes in the OS.  The most effective work-around
+seems to be to start an ssh-agent in each session, eg
+
+    eval `ssh-agent -s` && ssh-add -A
+
+And then at the end of the session
+
+    eval `ssh-agent -k`
+
+These commands can be used in scripts of course.
+
 ### Modified time ###
 
 Modified times are stored on the server to 1 second precision.
 
 Modified times are used in syncing and are fully supported.
 
+Some SFTP servers disable setting/modifying the file modification time after
+upload (for example, certain configurations of ProFTPd with mod_sftp). If you
+are using one of these servers, you can set the option `set_modtime = false` in
+your RClone backend configuration to disable this behaviour.
+
 ### Limitations ###
 
-SFTP does not support any checksums.
+SFTP supports checksums if the same login has shell access and `md5sum`
+or `sha1sum` as well as `echo` are in the remote's PATH.
+This remote check can be disabled by setting the configuration option
+`disable_hashcheck`. This may be required if you're connecting to SFTP servers
+which are not under your control, and to which the execution of remote commands
+is prohibited.
+
+The only ssh agent supported under Windows is Putty's pageant.
+
+The Go SSH library disables the use of the aes128-cbc cipher by
+default, due to security concerns. This can be re-enabled on a
+per-connection basis by setting the `use_insecure_cipher` setting in
+the configuration file to `true`. Further details on the insecurity of
+this cipher can be found [in this paper]
+(http://www.isg.rhul.ac.uk/~kp/SandPfinal.pdf).
 
 SFTP isn't supported under plan9 until [this
 issue](https://github.com/pkg/sftp/issues/156) is fixed.

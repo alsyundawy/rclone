@@ -1,12 +1,340 @@
 ---
 title: "Documentation"
 description: "Rclone Changelog"
-date: "2016-11-06"
+date: "2017-12-23"
 ---
 
 Changelog
 ---------
 
+  * v1.39 - 2017-12-23
+    * New backends
+      * WebDAV
+        * tested with nextcloud, owncloud, put.io and others!
+      * Pcloud
+      * cache - wraps a cache around other backends (Remus Bunduc)
+        * useful in combination with mount
+        * NB this feature is in beta so use with care
+    * New commands
+      * serve command with subcommands:
+        * serve webdav: this implements a webdav server for any rclone remote.
+        * serve http: command to serve a remote over HTTP
+      * config: add sub commands for full config file management
+        * create/delete/dump/edit/file/password/providers/show/update
+      * touch: to create or update the timestamp of a file (Jakub Tasiemski)
+    * New Features
+      * curl install for rclone (Filip Bartodziej)
+      * --stats now shows percentage, size, rate and ETA in condensed form (Ishuah Kariuki)
+      * --exclude-if-present to exclude a directory if a file is present (Iakov Davydov)
+      * rmdirs: add --leave-root flag (lewpam)
+      * move: add --delete-empty-src-dirs flag to remove dirs after move (Ishuah Kariuki)
+      * Add --dump flag, introduce --dump requests, responses and remove --dump-auth, --dump-filters
+        * Obscure X-Auth-Token: from headers when dumping too
+      * Document and implement exit codes for different failure modes (Ishuah Kariuki)
+    * Compile
+    * Bug Fixes
+      * Retry lots more different types of errors to make multipart transfers more reliable
+      * Save the config before asking for a token, fixes disappearing oauth config
+      * Warn the user if --include and --exclude are used together (Ernest Borowski)
+      * Fix duplicate files (eg on Google drive) causing spurious copies
+      * Allow trailing and leading whitespace for passwords (Jason Rose)
+      * ncdu: fix crashes on empty directories
+      * rcat: fix goroutine leak
+      * moveto/copyto: Fix to allow copying to the same name
+    * Mount
+      * --vfs-cache mode to make writes into mounts more reliable.
+        * this requires caching files on the disk (see --cache-dir)
+        * As this is a new feature, use with care
+      * Use sdnotify to signal systemd the mount is ready (Fabian Möller)
+      * Check if directory is not empty before mounting (Ernest Borowski)
+    * Local
+      * Add error message for cross file system moves
+      * Fix equality check for times
+    * Dropbox
+      * Rework multipart upload
+        * buffer the chunks when uploading large files so they can be retried
+        * change default chunk size to 48MB now we are buffering them in memory
+        * retry every error after the first chunk is done successfully
+      * Fix error when renaming directories
+    * Swift
+      * Fix crash on bad authentication
+    * Google Drive
+      * Add service account support (Tim Cooijmans)
+    * S3
+      * Make it work properly with Digital Ocean Spaces (Andrew Starr-Bochicchio)
+      * Fix crash if a bad listing is received
+      * Add support for ECS task IAM roles (David Minor)
+    * Backblaze B2
+      * Fix multipart upload retries
+      * Fix --hard-delete to make it work 100% of the time
+    * Swift
+      * Allow authentication with storage URL and auth key (Giovanni Pizzi)
+      * Add new fields for swift configuration to support IBM Bluemix Swift (Pierre Carlson)
+      * Add OS_TENANT_ID and OS_USER_ID to config
+      * Allow configs with user id instead of user name
+      * Check if swift segments container exists before creating (John Leach)
+      * Fix memory leak in swift transfers (upstream fix)
+    * SFTP
+      * Add option to enable the use of aes128-cbc cipher (Jon Fautley)
+    * Amazon cloud drive
+      * Fix download of large files failing with "Only one auth mechanism allowed"
+    * crypt
+      * Option to encrypt directory names or leave them intact
+      * Implement DirChangeNotify (Fabian Möller)
+    * onedrive
+      * Add option to choose resourceURL during setup of OneDrive Business account if more than one is available for user
+  * v1.38 - 2017-09-30
+    * New backends
+      * Azure Blob Storage (thanks Andrei Dragomir)
+      * Box
+      * Onedrive for Business (thanks Oliver Heyme)
+      * QingStor from QingCloud (thanks wuyu)
+    * New commands
+      * `rcat` - read from standard input and stream upload
+      * `tree` - shows a nicely formatted recursive listing
+      * `cryptdecode` - decode crypted file names (thanks ishuah)
+      * `config show` - print the config file
+      * `config file` - print the config file location
+    * New Features
+      * Empty directories are deleted on `sync`
+      * `dedupe` - implement merging of duplicate directories
+      * `check` and `cryptcheck` made more consistent and use less memory
+      * `cleanup` for remaining remotes (thanks ishuah)
+      * `--immutable` for ensuring that files don't change (thanks Jacob McNamee)
+      * `--user-agent` option (thanks Alex McGrath Kraak)
+      * `--disable` flag to disable optional features
+      * `--bind` flag for choosing the local addr on outgoing connections
+      * Support for zsh auto-completion (thanks bpicode)
+      * Stop normalizing file names but do a normalized compare in `sync`
+    * Compile
+      * Update to using go1.9 as the default go version
+      * Remove snapd build due to maintenance problems
+    * Bug Fixes
+      * Improve retriable error detection which makes multipart uploads better
+      * Make `check` obey `--ignore-size`
+      * Fix bwlimit toggle in conjunction with schedules (thanks cbruegg)
+      * `config` ensures newly written config is on the same mount
+    * Local
+      * Revert to copy when moving file across file system boundaries
+      * `--skip-links` to suppress symlink warnings (thanks Zhiming Wang)
+    * Mount
+      * Re-use `rcat` internals to support uploads from all remotes
+    * Dropbox
+      * Fix "entry doesn't belong in directory" error
+      * Stop using deprecated API methods
+    * Swift
+      * Fix server side copy to empty container with `--fast-list`
+    * Google Drive
+      * Change the default for `--drive-use-trash` to `true`
+    * S3
+      * Set session token when using STS (thanks Girish Ramakrishnan)
+      * Glacier docs and error messages (thanks Jan Varho)
+      * Read 1000 (not 1024) items in dir listings to fix Wasabi
+    * Backblaze B2
+      * Fix SHA1 mismatch when downloading files with no SHA1
+      * Calculate missing hashes on the fly instead of spooling
+      * `--b2-hard-delete` to permanently delete (not hide) files (thanks John Papandriopoulos)
+    * Hubic
+      * Fix creating containers - no longer have to use the `default` container
+    * Swift
+      * Optionally configure from a standard set of OpenStack environment vars
+      * Add `endpoint_type` config
+    * Google Cloud Storage
+      * Fix bucket creation to work with limited permission users
+    * SFTP
+      * Implement connection pooling for multiple ssh connections
+      * Limit new connections per second
+      * Add support for MD5 and SHA1 hashes where available (thanks Christian Brüggemann)
+    * HTTP
+      * Fix URL encoding issues
+      * Fix directories with `:` in
+      * Fix panic with URL encoded content
+  * v1.37 - 2017-07-22
+    * New backends
+      * FTP - thanks to Antonio Messina
+      * HTTP - thanks to Vasiliy Tolstov
+    * New commands
+      * rclone ncdu - for exploring a remote with a text based user interface.
+      * rclone lsjson - for listing with a machine readable output
+      * rclone dbhashsum - to show Dropbox style hashes of files (local or Dropbox)
+    * New Features
+      * Implement --fast-list flag
+        * This allows remotes to list recursively if they can
+        * This uses less transactions (important if you pay for them)
+        * This may or may not be quicker
+        * This will use more memory as it has to hold the listing in memory
+        * --old-sync-method deprecated - the remaining uses are covered by --fast-list
+        * This involved a major re-write of all the listing code
+      * Add --tpslimit and --tpslimit-burst to limit transactions per second
+        * this is useful in conjuction with `rclone mount` to limit external apps
+      * Add --stats-log-level so can see --stats without -v
+      * Print password prompts to stderr - Hraban Luyat
+      * Warn about duplicate files when syncing
+      * Oauth improvements
+        * allow auth_url and token_url to be set in the config file
+        * Print redirection URI if using own credentials.
+      * Don't Mkdir at the start of sync to save transactions
+    * Compile
+      * Update build to go1.8.3
+      * Require go1.6 for building rclone
+      * Compile 386 builds with "GO386=387" for maximum compatibility
+    * Bug Fixes
+      * Fix menu selection when no remotes
+      * Config saving reworked to not kill the file if disk gets full
+      * Don't delete remote if name does not change while renaming
+      * moveto, copyto: report transfers and checks as per move and copy
+    * Local
+      * Add --local-no-unicode-normalization flag - Bob Potter
+    * Mount
+      * Now supported on Windows using cgofuse and WinFsp - thanks to Bill Zissimopoulos for much help
+      * Compare checksums on upload/download via FUSE
+      * Unmount when program ends with SIGINT (Ctrl+C) or SIGTERM - Jérôme Vizcaino
+      * On read only open of file, make open pending until first read
+      * Make --read-only reject modify operations
+      * Implement ModTime via FUSE for remotes that support it
+      * Allow modTime to be changed even before all writers are closed
+      * Fix panic on renames
+      * Fix hang on errored upload
+    * Crypt
+      * Report the name:root as specified by the user
+      * Add an "obfuscate" option for filename encryption - Stephen Harris
+    * Amazon Drive
+      * Fix initialization order for token renewer
+      * Remove revoked credentials, allow oauth proxy config and update docs
+    * B2
+      * Reduce minimum chunk size to 5MB
+    * Drive
+      * Add team drive support
+      * Reduce bandwidth by adding fields for partial responses - Martin Kristensen
+      * Implement --drive-shared-with-me flag to view shared with me files - Danny Tsai
+      * Add --drive-trashed-only to read only the files in the trash
+      * Remove obsolete --drive-full-list
+      * Add missing seek to start on retries of chunked uploads
+      * Fix stats accounting for upload
+      * Convert / in names to a unicode equivalent (／)
+      * Poll for Google Drive changes when mounted
+    * OneDrive
+      * Fix the uploading of files with spaces
+      * Fix initialization order for token renewer
+      * Display speeds accurately when uploading - Yoni Jah
+      * Swap to using http://localhost:53682/ as redirect URL - Michael Ledin
+      * Retry on token expired error, reset upload body on retry - Yoni Jah
+    * Google Cloud Storage
+      * Add ability to specify location and storage class via config and command line - thanks gdm85
+      * Create container if necessary on server side copy
+      * Increase directory listing chunk to 1000 to increase performance
+      * Obtain a refresh token for GCS - Steven Lu
+    * Yandex
+      * Fix the name reported in log messages (was empty)
+      * Correct error return for listing empty directory
+    * Dropbox
+      * Rewritten to use the v2 API
+        * Now supports ModTime
+          * Can only set by uploading the file again
+          * If you uploaded with an old rclone, rclone may upload everything again
+          * Use `--size-only` or `--checksum` to avoid this
+        * Now supports the Dropbox content hashing scheme
+        * Now supports low level retries
+    * S3
+      * Work around eventual consistency in bucket creation
+      * Create container if necessary on server side copy
+      * Add us-east-2 (Ohio) and eu-west-2 (London) S3 regions - Zahiar Ahmed
+    * Swift, Hubic
+      * Fix zero length directory markers showing in the subdirectory listing
+        * this caused lots of duplicate transfers
+      * Fix paged directory listings
+        * this caused duplicate directory errors
+      * Create container if necessary on server side copy
+      * Increase directory listing chunk to 1000 to increase performance
+      * Make sensible error if the user forgets the container
+    * SFTP
+      * Add support for using ssh key files
+      * Fix under Windows
+      * Fix ssh agent on Windows
+      * Adapt to latest version of library - Igor Kharin
+  * v1.36 - 2017-03-18
+    * New Features
+      * SFTP remote (Jack Schmidt)
+      * Re-implement sync routine to work a directory at a time reducing memory usage
+      * Logging revamped to be more inline with rsync - now much quieter
+          * -v only shows transfers
+          * -vv is for full debug
+          * --syslog to log to syslog on capable platforms
+      * Implement --backup-dir and --suffix
+      * Implement --track-renames (initial implementation by Bjørn Erik Pedersen)
+      * Add time-based bandwidth limits (Lukas Loesche)
+      * rclone cryptcheck: checks integrity of crypt remotes
+      * Allow all config file variables and options to be set from environment variables
+      * Add --buffer-size parameter to control buffer size for copy
+      * Make --delete-after the default
+      * Add --ignore-checksum flag (fixed by Hisham Zarka)
+      * rclone check: Add --download flag to check all the data, not just hashes
+      * rclone cat: add --head, --tail, --offset, --count and --discard
+      * rclone config: when choosing from a list, allow the value to be entered too
+      * rclone config: allow rename and copy of remotes
+      * rclone obscure: for generating encrypted passwords for rclone's config (T.C. Ferguson)
+      * Comply with XDG Base Directory specification (Dario Giovannetti)
+        * this moves the default location of the config file in a backwards compatible way
+      * Release changes
+        * Ubuntu snap support (Dedsec1)
+        * Compile with go 1.8
+        * MIPS/Linux big and little endian support
+    * Bug Fixes
+      * Fix copyto copying things to the wrong place if the destination dir didn't exist
+      * Fix parsing of remotes in moveto and copyto
+      * Fix --delete-before deleting files on copy
+      * Fix --files-from with an empty file copying everything
+      * Fix sync: don't update mod times if --dry-run set
+      * Fix MimeType propagation
+      * Fix filters to add ** rules to directory rules
+    * Local
+      * Implement -L, --copy-links flag to allow rclone to follow symlinks
+      * Open files in write only mode so rclone can write to an rclone mount
+      * Fix unnormalised unicode causing problems reading directories
+      * Fix interaction between -x flag and --max-depth
+    * Mount
+      * Implement proper directory handling (mkdir, rmdir, renaming)
+      * Make include and exclude filters apply to mount
+      * Implement read and write async buffers - control with --buffer-size
+      * Fix fsync on for directories
+      * Fix retry on network failure when reading off crypt
+    * Crypt
+      * Add --crypt-show-mapping to show encrypted file mapping
+      * Fix crypt writer getting stuck in a loop
+        * **IMPORTANT** this bug had the potential to cause data corruption when
+          * reading data from a network based remote and
+          * writing to a crypt on Google Drive
+        * Use the cryptcheck command to validate your data if you are concerned
+        * If syncing two crypt remotes, sync the unencrypted remote
+    * Amazon Drive
+      * Fix panics on Move (rename)
+      * Fix panic on token expiry
+    * B2
+      * Fix inconsistent listings and rclone check
+      * Fix uploading empty files with go1.8
+      * Constrain memory usage when doing multipart uploads
+      * Fix upload url not being refreshed properly
+    * Drive
+      * Fix Rmdir on directories with trashed files
+      * Fix "Ignoring unknown object" when downloading
+      * Add --drive-list-chunk
+      * Add --drive-skip-gdocs (Károly Oláh)
+    * OneDrive
+      * Implement Move
+      * Fix Copy
+        * Fix overwrite detection in Copy
+        * Fix waitForJob to parse errors correctly
+      * Use token renewer to stop auth errors on long uploads
+      * Fix uploading empty files with go1.8
+    * Google Cloud Storage
+      * Fix depth 1 directory listings
+    * Yandex
+      * Fix single level directory listing
+    * Dropbox
+      * Normalise the case for single level directory listings
+      * Fix depth 1 listing
+    * S3
+      * Added ca-central-1 region (Jon Yergatian)
   * v1.35 - 2017-01-02
     * New Features
       * moveto and copyto commands for choosing a destination name on copy/move
@@ -308,7 +636,7 @@ Changelog
       * Upload releases to github too
     * Swift
       * Fix sync for chunked files
-    * One Drive
+    * OneDrive
       * Re-enable server side copy
       * Don't mask HTTP error codes with JSON decode error
     * S3
@@ -324,11 +652,11 @@ Changelog
       * Stop SetModTime losing metadata (eg X-Object-Manifest)
         * This could have caused data loss for files > 5GB in size
       * Use ContentType from Object to avoid lookups in listings
-    * One Drive
+    * OneDrive
       * disable server side copy as it seems to be broken at Microsoft
   * v1.24 - 2015-11-07
     * New features
-      * Add support for Microsoft One Drive
+      * Add support for Microsoft OneDrive
       * Add `--no-check-certificate` option to disable server certificate verification
       * Add async readahead buffer for faster transfer of big files
     * Fixes

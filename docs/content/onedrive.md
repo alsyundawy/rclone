@@ -51,7 +51,9 @@ Choose a number from below, or type in your own value
    \ "onedrive"
 11 / Openstack Swift (Rackspace Cloud Files, Memset Memstore, OVH)
    \ "swift"
-12 / Yandex Disk
+12 / SSH/SFTP Connection
+   \ "sftp"
+13 / Yandex Disk
    \ "yandex"
 Storage> 10
 Microsoft App Client Id - leave blank normally.
@@ -59,6 +61,12 @@ client_id>
 Microsoft App Client Secret - leave blank normally.
 client_secret>
 Remote config
+Choose OneDrive account type?
+ * Say b for a OneDrive business account
+ * Say p for a personal OneDrive account
+b) Business
+p) Personal
+b/p> p
 Use auto config?
  * Say Y if not sure
  * Say N if you are working on a remote or headless machine
@@ -104,6 +112,21 @@ To copy a local directory to an OneDrive directory called backup
 
     rclone copy /home/source remote:backup
 
+### OneDrive for Business ###
+
+There is additional support for OneDrive for Business.
+Select "b" when ask
+```
+Choose OneDrive account type?
+ * Say b for a OneDrive business account
+ * Say p for a personal OneDrive account
+b) Business
+p) Personal
+b/p> 
+```
+After that rclone requires an authentication of your account. The application will first authenticate your account, then query the OneDrive resource URL
+and do a second (silent) authentication for this resource URL. 
+
 ### Modified time and hashes ###
 
 OneDrive allows modification times to be set on objects accurate to 1
@@ -139,10 +162,6 @@ is 10MB.
 
 Note that OneDrive is case insensitive so you can't have a
 file called "Hello.doc" and one called "hello.doc".
-
-Rclone only supports your default OneDrive, and doesn't work with One
-Drive for business.  Both these issues may be fixed at some point
-depending on user demand!
 
 There are quite a few characters that can't be in OneDrive file
 names.  These can't occur on Windows platforms, but on non-Windows
