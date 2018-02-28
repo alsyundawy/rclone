@@ -350,7 +350,8 @@ func TestRWFileHandleWriteAt(t *testing.T) {
 	// Preconditions
 	assert.Equal(t, int64(0), offset())
 	assert.True(t, fh.opened)
-	assert.True(t, fh.writeCalled)
+	assert.False(t, fh.writeCalled)
+	assert.True(t, fh.changed)
 
 	// Write the data
 	n, err := fh.WriteAt([]byte("hello**"), 0)
@@ -523,8 +524,10 @@ func testRWFileHandleOpenTest(t *testing.T, vfs *VFS, test *openTest) {
 	require.NoError(t, err, test.what)
 
 	// check
+	assert.Equal(t, test.openNonExistentErr, openNonExistentErr, "openNonExistentErr: %s: want=%v, got=%v", test.what, test.openNonExistentErr, openNonExistentErr)
 	assert.Equal(t, test.readNonExistentErr, readNonExistentErr, "readNonExistentErr: %s: want=%v, got=%v", test.what, test.readNonExistentErr, readNonExistentErr)
 	assert.Equal(t, test.writeNonExistentErr, writeNonExistentErr, "writeNonExistentErr: %s: want=%v, got=%v", test.what, test.writeNonExistentErr, writeNonExistentErr)
+	assert.Equal(t, test.openExistingErr, openExistingErr, "openExistingErr: %s: want=%v, got=%v", test.what, test.openExistingErr, openExistingErr)
 	assert.Equal(t, test.readExistingErr, readExistingErr, "readExistingErr: %s: want=%v, got=%v", test.what, test.readExistingErr, readExistingErr)
 	assert.Equal(t, test.writeExistingErr, writeExistingErr, "writeExistingErr: %s: want=%v, got=%v", test.what, test.writeExistingErr, writeExistingErr)
 	assert.Equal(t, test.contents, contents, test.what)
