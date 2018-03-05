@@ -21,6 +21,7 @@ type File struct {
 	mu                sync.Mutex // protects the following
 	o                 fs.Object  // NB o may be nil if file is being written
 	leaf              string     // leaf name of the object
+	rwOpenCount       int        // number of open files on this handle
 	writers           []Handle   // writers for this file
 	readWriters       int        // how many RWFileHandle are open for writing
 	readWriterClosing bool       // is a RWFileHandle currently cosing?
@@ -138,6 +139,31 @@ func (f *File) delWriter(h Handle, modifiedCacheFile bool) (lastWriterAndModifie
 	return
 }
 
+// addRWOpen should be called by ReadWriteHandle when they have
+// actually opened the file for read or write.
+func (f *File) addRWOpen() {
+	f.mu.Lock()
+	f.rwOpenCount++
+	f.mu.Unlock()
+}
+
+// delRWOpen should be called by ReadWriteHandle when they have closed
+// an actually opene file for read or write.
+func (f *File) delRWOpen() {
+	f.mu.Lock()
+	f.rwOpenCount--
+	f.mu.Unlock()
+}
+
+// rwOpens returns how many active open ReadWriteHandles there are.
+// Note that file handles which are in pending open state aren't
+// counted.
+func (f *File) rwOpens() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.rwOpenCount
+}
+
 // finishWriterClose resets the readWriterClosing flag
 func (f *File) finishWriterClose() {
 	f.mu.Lock()
@@ -252,6 +278,21 @@ func (f *File) setObject(o fs.Object) {
 	f.d.addObject(f)
 }
 
+// Update the object but don't update the directory cache - for use by
+// the directory cache
+func (f *File) setObjectNoUpdate(o fs.Object) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.o = o
+}
+
+// Get the current fs.Object - may be nil
+func (f *File) getObject() fs.Object {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.o
+}
+
 // exists returns whether the file exists already
 func (f *File) exists() bool {
 	f.mu.Lock()
@@ -284,13 +325,13 @@ func (f *File) waitForValidObject() (o fs.Object, err error) {
 // openRead open the file for read
 func (f *File) openRead() (fh *ReadFileHandle, err error) {
 	// if o is nil it isn't valid yet
-	o, err := f.waitForValidObject()
+	_, err = f.waitForValidObject()
 	if err != nil {
 		return nil, err
 	}
 	// fs.Debugf(o, "File.openRead")
 
-	fh, err = newReadFileHandle(f, o)
+	fh, err = newReadFileHandle(f)
 	if err != nil {
 		fs.Errorf(f, "File.openRead failed: %v", err)
 		return nil, err
