@@ -32,11 +32,11 @@ type remoteConfig struct {
 
 var (
 	remotes = []remoteConfig{
-		{
-			Name:     "TestAmazonCloudDrive:",
-			SubDir:   false,
-			FastList: false,
-		},
+		// {
+		// 	Name:     "TestAmazonCloudDrive:",
+		// 	SubDir:   false,
+		// 	FastList: false,
+		// },
 		{
 			Name:     "TestB2:",
 			SubDir:   true,
@@ -129,6 +129,11 @@ var (
 		},
 		{
 			Name:     "TestCache:",
+			SubDir:   false,
+			FastList: false,
+		},
+		{
+			Name:     "TestMega:",
 			SubDir:   false,
 			FastList: false,
 		},
@@ -272,6 +277,7 @@ func (t *test) cleanFs() error {
 		remote := dir.Remote()
 		if fstest.MatchTestRemote.MatchString(remote) {
 			log.Printf("Purging %s%s", t.remote, remote)
+			time.Sleep(2500 * time.Millisecond) // sleep to rate limit bucket deletes for gcs
 			dir, err := fs.NewFs(t.remote + remote)
 			if err != nil {
 				return err

@@ -277,12 +277,8 @@ func parsePath(path string) (bucket, directory string, err error) {
 	return
 }
 
-func getServiceAccountClient(keyJsonfilePath string) (*http.Client, error) {
-	data, err := ioutil.ReadFile(os.ExpandEnv(keyJsonfilePath))
-	if err != nil {
-		return nil, errors.Wrap(err, "error opening credentials file")
-	}
-	conf, err := google.JWTConfigFromJSON(data, storageConfig.Scopes...)
+func getServiceAccountClient(credentialsData []byte) (*http.Client, error) {
+	conf, err := google.JWTConfigFromJSON(credentialsData, storageConfig.Scopes...)
 	if err != nil {
 		return nil, errors.Wrap(err, "error processing credentials")
 	}
@@ -295,16 +291,25 @@ func NewFs(name, root string) (fs.Fs, error) {
 	var oAuthClient *http.Client
 	var err error
 
+	// try loading service account credentials from env variable, then from a file
+	serviceAccountCreds := []byte(config.FileGet(name, "service_account_credentials"))
 	serviceAccountPath := config.FileGet(name, "service_account_file")
-	if serviceAccountPath != "" {
-		oAuthClient, err = getServiceAccountClient(serviceAccountPath)
+	if len(serviceAccountCreds) == 0 && serviceAccountPath != "" {
+		loadedCreds, err := ioutil.ReadFile(os.ExpandEnv(serviceAccountPath))
 		if err != nil {
-			log.Fatalf("Failed configuring Google Cloud Storage Service Account: %v", err)
+			return nil, errors.Wrap(err, "error opening service account credentials file")
+		}
+		serviceAccountCreds = loadedCreds
+	}
+	if len(serviceAccountCreds) > 0 {
+		oAuthClient, err = getServiceAccountClient(serviceAccountCreds)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed configuring Google Cloud Storage Service Account")
 		}
 	} else {
 		oAuthClient, _, err = oauthutil.NewClient(name, storageConfig)
 		if err != nil {
-			log.Fatalf("Failed to configure Google Cloud Storage: %v", err)
+			return nil, errors.Wrap(err, "failed to configure Google Cloud Storage")
 		}
 	}
 
@@ -437,6 +442,17 @@ func (f *Fs) list(dir string, recurse bool, fn listFn) error {
 				continue
 			}
 			remote := object.Name[rootLength:]
+			// is this a directory marker?
+			if (strings.HasSuffix(remote, "/") || remote == "") && object.Size == 0 {
+				if recurse {
+					// add a directory in if --fast-list since will have no prefixes
+					err = fn(remote[:len(remote)-1], object, true)
+					if err != nil {
+						return err
+					}
+				}
+				continue // skip directory marker
+			}
 			err = fn(remote, object, false)
 			if err != nil {
 				return err
@@ -597,7 +613,9 @@ func (f *Fs) Mkdir(dir string) error {
 	if f.bucketOK {
 		return nil
 	}
-	_, err := f.svc.Buckets.Get(f.bucket).Do()
+	// List something from the bucket to see if it exists.  Doing it like this enables the use of a
+	// service account that only has the "Storage Object Admin" role.  See #2193 for details.
+	_, err := f.svc.Objects.List(f.bucket).MaxResults(1).Do()
 	if err == nil {
 		// Bucket already exists
 		f.bucketOK = true

@@ -4,6 +4,7 @@ package all
 import (
 	// Active commands
 	_ "github.com/ncw/rclone/cmd"
+	_ "github.com/ncw/rclone/cmd/about"
 	_ "github.com/ncw/rclone/cmd/authorize"
 	_ "github.com/ncw/rclone/cmd/cachestats"
 	_ "github.com/ncw/rclone/cmd/cat"
@@ -20,7 +21,9 @@ import (
 	_ "github.com/ncw/rclone/cmd/delete"
 	_ "github.com/ncw/rclone/cmd/genautocomplete"
 	_ "github.com/ncw/rclone/cmd/gendocs"
+	_ "github.com/ncw/rclone/cmd/hashsum"
 	_ "github.com/ncw/rclone/cmd/info"
+	_ "github.com/ncw/rclone/cmd/link"
 	_ "github.com/ncw/rclone/cmd/listremotes"
 	_ "github.com/ncw/rclone/cmd/ls"
 	_ "github.com/ncw/rclone/cmd/lsd"
@@ -36,6 +39,7 @@ import (
 	_ "github.com/ncw/rclone/cmd/ncdu"
 	_ "github.com/ncw/rclone/cmd/obscure"
 	_ "github.com/ncw/rclone/cmd/purge"
+	_ "github.com/ncw/rclone/cmd/rc"
 	_ "github.com/ncw/rclone/cmd/rcat"
 	_ "github.com/ncw/rclone/cmd/rmdir"
 	_ "github.com/ncw/rclone/cmd/rmdirs"

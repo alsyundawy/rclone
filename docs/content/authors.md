@@ -91,7 +91,7 @@ Contributors
   * John Papandriopoulos <jpap@users.noreply.github.com>
   * Zhiming Wang <zmwangx@gmail.com>
   * Andy Pilate <cubox@cubox.me>
-  * Oliver Heyme <olihey@googlemail.com> <olihey@users.noreply.github.com>
+  * Oliver Heyme <olihey@googlemail.com> <olihey@users.noreply.github.com> <de8olihe@lego.com>
   * wuyu <wuyu@yunify.com>
   * Andrei Dragomir <adragomi@adobe.com>
   * Christian Brüggemann <mail@cbruegg.com>
@@ -125,7 +125,7 @@ Contributors
   * Jon Fautley <jon@dead.li>
   * lewapm <32110057+lewapm@users.noreply.github.com>
   * Yassine Imounachen <yassine256@gmail.com>
-  * Chris Redekop <chris-redekop@users.noreply.github.com>
+  * Chris Redekop <chris-redekop@users.noreply.github.com> <chris.redekop@gmail.com>
   * Jon Fautley <jon@adenoid.appstal.co.uk>
   * Will Gunn <WillGunn@users.noreply.github.com>
   * Lucas Bremgartner <lucas@bremis.ch>
@@ -137,3 +137,30 @@ Contributors
   * Mateusz <pabian.mateusz@gmail.com>
   * Daniel Loader <spicypixel@gmail.com>
   * David0rk <davidork@gmail.com>
+  * Alexander Neumann <alexander@bumpern.de>
+  * Giri Badanahatti <gbadanahatti@us.ibm.com@Giris-MacBook-Pro.local>
+  * Leo R. Lundgren <leo@finalresort.org>
+  * wolfv <wolfv6@users.noreply.github.com>
+  * Dave Pedu <dave@davepedu.com>
+  * Stefan Lindblom <lindblom@spotify.com>
+  * seuffert <oliver@seuffert.biz>
+  * gbadanahatti <37121690+gbadanahatti@users.noreply.github.com>
+  * Keith Goldfarb <barkofdelight@gmail.com>
+  * Steve Kriss <steve@heptio.com>
+  * Chih-Hsuan Yen <yan12125@gmail.com>
+  * Alexander Neumann <fd0@users.noreply.github.com>
+  * Matt Holt <mholt@users.noreply.github.com>
+  * Eri Bastos <bastos.eri@gmail.com>
+  * Michael P. Dubner <pywebmail@list.ru>
+  * Antoine GIRARD <sapk@users.noreply.github.com>
+  * Mateusz Piotrowski <mpp302@gmail.com>
+  * Animosity022 <animosity22@users.noreply.github.com>
+  * Peter Baumgartner <pete@lincolnloop.com>
+  * Craig Rachel <craig@craigrachel.com>
+  * Michael G. Noll <miguno@users.noreply.github.com>
+  * hensur <me@hensur.de>
+  * Oliver Heyme <de8olihe@lego.com>
+  * Richard Yang <richard@yenforyang.com>
+  * Piotr Oleszczyk <piotr.oleszczyk@gmail.com>
+  * Rodrigo <rodarima@gmail.com>
+  * NoLooseEnds <NoLooseEnds@users.noreply.github.com>

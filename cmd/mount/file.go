@@ -3,7 +3,7 @@
 package mount
 
 import (
-	"os"
+	"io"
 	"time"
 
 	"bazil.org/fuse"
@@ -11,7 +11,7 @@ import (
 	"github.com/ncw/rclone/cmd/mountlib"
 	"github.com/ncw/rclone/fs/log"
 	"github.com/ncw/rclone/vfs"
-	"golang.org/x/net/context"
+	"golang.org/x/net/context" // switch to "context" when we stop supporting go1.8
 )
 
 // File represents a file
@@ -69,16 +69,13 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 
 	// fuse flags are based off syscall flags as are os flags, so
 	// should be compatible
-	//
-	// we seem to be missing O_CREATE here so add it in to allow
-	// file creation
-	handle, err := f.File.Open(int(req.Flags) | os.O_CREATE)
+	handle, err := f.File.Open(int(req.Flags))
 	if err != nil {
 		return nil, translateError(err)
 	}
 
 	// See if seeking is supported and set FUSE hint accordingly
-	if _, err = handle.Seek(0, 1); err != nil {
+	if _, err = handle.Seek(0, io.SeekCurrent); err != nil {
 		resp.Flags |= fuse.OpenNonSeekable
 	}
 

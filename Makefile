@@ -66,6 +66,11 @@ ifdef FULL_TESTS
 	go get -u github.com/tools/godep
 endif
 
+# Get the release dependencies
+release_dep:
+	go get -u github.com/goreleaser/nfpm/...
+	go get -u github.com/aktau/github-release
+
 # Update dependencies
 update:
 	go get -u github.com/golang/dep/cmd/dep
@@ -88,6 +93,9 @@ MANUAL.txt:	MANUAL.md
 commanddocs: rclone
 	rclone gendocs docs/content/commands/
 
+rcdocs: rclone
+	bin/make_rc_docs.sh
+
 install: rclone
 	install -d ${DESTDIR}/usr/bin
 	install -t ${DESTDIR}/usr/bin ${GOPATH}/bin/rclone
@@ -104,8 +112,22 @@ website:
 upload_website:	website
 	rclone -v sync docs/public memstore:www-rclone-org
 
+tarball:
+	git archive -9 --format=tar.gz --prefix=rclone-$(TAG)/ -o build/rclone-$(TAG).tar.gz $(TAG)
+
+sign_upload:
+	cd build && md5sum rclone-v* | gpg --clearsign > MD5SUMS
+	cd build && sha1sum rclone-v* | gpg --clearsign > SHA1SUMS
+	cd build && sha256sum rclone-v* | gpg --clearsign > SHA256SUMS
+
+check_sign:
+	cd build && gpg --verify MD5SUMS && gpg --decrypt MD5SUMS | md5sum -c
+	cd build && gpg --verify SHA1SUMS && gpg --decrypt SHA1SUMS | sha1sum -c
+	cd build && gpg --verify SHA256SUMS && gpg --decrypt SHA256SUMS | sha256sum -c
+
 upload:
-	rclone -v copy build/ memstore:downloads-rclone-org
+	rclone -v copy --exclude '*current*' build/ memstore:downloads-rclone-org/$(TAG)
+	rclone -v copy --include '*current*' --include version.txt build/ memstore:downloads-rclone-org
 
 upload_github:
 	./bin/upload-github $(TAG)
@@ -174,9 +196,6 @@ retag:
 startdev:
 	echo -e "package fs\n\n// Version of rclone\nvar Version = \"$(LAST_TAG)-DEV\"\n" | gofmt > fs/version.go
 	git commit -m "Start $(LAST_TAG)-DEV development" fs/version.go
-
-gen_tests:
-	cd fstest/fstests && go generate
 
 winzip:
 	zip -9 rclone-$(TAG).zip rclone.exe

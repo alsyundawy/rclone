@@ -12,7 +12,7 @@ import (
 	"github.com/ncw/rclone/fs/log"
 	"github.com/ncw/rclone/vfs"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
+	"golang.org/x/net/context" // switch to "context" when we stop supporting go1.8
 )
 
 // Dir represents a directory entry
@@ -182,4 +182,14 @@ func (d *Dir) Fsync(ctx context.Context, req *fuse.FsyncRequest) (err error) {
 		return translateError(err)
 	}
 	return nil
+}
+
+// Check interface satisfied
+var _ fusefs.NodeLinker = (*Dir)(nil)
+
+// Link creates a new directory entry in the receiver based on an
+// existing Node. Receiver must be a directory.
+func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fusefs.Node) (new fusefs.Node, err error) {
+	defer log.Trace(d, "req=%v, old=%v", req, old)("new=%v, err=%v", &new, &err)
+	return nil, fuse.ENOSYS
 }

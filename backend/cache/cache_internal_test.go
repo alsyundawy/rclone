@@ -1,4 +1,4 @@
-// +build !plan9,go1.7
+// +build !plan9
 
 package cache_test
 
@@ -24,6 +24,9 @@ import (
 	"fmt"
 	"runtime/debug"
 
+	"encoding/json"
+	"net/http"
+
 	"github.com/ncw/rclone/backend/cache"
 	"github.com/ncw/rclone/backend/crypt"
 	_ "github.com/ncw/rclone/backend/drive"
@@ -31,6 +34,8 @@ import (
 	"github.com/ncw/rclone/fs"
 	"github.com/ncw/rclone/fs/config"
 	"github.com/ncw/rclone/fs/object"
+	"github.com/ncw/rclone/fs/rc"
+	"github.com/ncw/rclone/fs/rc/rcflags"
 	"github.com/ncw/rclone/fstest"
 	"github.com/ncw/rclone/vfs"
 	"github.com/ncw/rclone/vfs/vfsflags"
@@ -97,6 +102,7 @@ func TestMain(m *testing.M) {
 	goflag.Parse()
 	var rc int
 
+	log.Printf("Running with the following params: \n remote: %v, \n mount: %v", remoteName, useMount)
 	runInstance = newRun()
 	rc = m.Run()
 	os.Exit(rc)
@@ -606,6 +612,56 @@ func TestInternalChangeSeenAfterDirCacheFlush(t *testing.T) {
 	require.Equal(t, wrappedTime.Unix(), co.ModTime().Unix())
 }
 
+func TestInternalChangeSeenAfterRc(t *testing.T) {
+	rcflags.Opt.Enabled = true
+	rc.Start(&rcflags.Opt)
+
+	id := fmt.Sprintf("ticsarc%v", time.Now().Unix())
+	rootFs, boltDb := runInstance.newCacheFs(t, remoteName, id, false, true, nil, map[string]string{"rc": "true"})
+	defer runInstance.cleanupFs(t, rootFs, boltDb)
+
+	if !runInstance.useMount {
+		t.Skipf("needs mount")
+	}
+
+	cfs, err := runInstance.getCacheFs(rootFs)
+	require.NoError(t, err)
+	chunkSize := cfs.ChunkSize()
+
+	// create some rand test data
+	testData := runInstance.randomBytes(t, (chunkSize*4 + chunkSize/2))
+	runInstance.writeRemoteBytes(t, rootFs, "data.bin", testData)
+
+	// update in the wrapped fs
+	o, err := cfs.UnWrap().NewObject(runInstance.encryptRemoteIfNeeded(t, "data.bin"))
+	require.NoError(t, err)
+	wrappedTime := time.Now().Add(-1 * time.Hour)
+	err = o.SetModTime(wrappedTime)
+	require.NoError(t, err)
+
+	// get a new instance from the cache
+	co, err := rootFs.NewObject("data.bin")
+	require.NoError(t, err)
+	require.NotEqual(t, o.ModTime().String(), co.ModTime().String())
+
+	m := make(map[string]string)
+	res, err := http.Post(fmt.Sprintf("http://localhost:5572/cache/expire?remote=%s", "data.bin"), "application/json; charset=utf-8", strings.NewReader(""))
+	require.NoError(t, err)
+	defer func() {
+		_ = res.Body.Close()
+	}()
+	_ = json.NewDecoder(res.Body).Decode(&m)
+	require.Contains(t, m, "status")
+	require.Contains(t, m, "message")
+	require.Equal(t, "ok", m["status"])
+	require.Contains(t, m["message"], "cached file cleared")
+
+	// get a new instance from the cache
+	co, err = rootFs.NewObject("data.bin")
+	require.NoError(t, err)
+	require.Equal(t, wrappedTime.Unix(), co.ModTime().Unix())
+}
+
 func TestInternalCacheWrites(t *testing.T) {
 	id := "ticw"
 	rootFs, boltDb := runInstance.newCacheFs(t, remoteName, id, false, true, nil, map[string]string{"cache-writes": "true"})
@@ -695,6 +751,58 @@ func TestInternalExpiredEntriesRemoved(t *testing.T) {
 		return nil
 	}, 10, time.Second)
 	require.NoError(t, err)
+}
+
+func TestInternalBug2117(t *testing.T) {
+	vfsflags.Opt.DirCacheTime = time.Second * 10
+
+	id := fmt.Sprintf("tib2117%v", time.Now().Unix())
+	rootFs, boltDb := runInstance.newCacheFs(t, remoteName, id, false, true, nil,
+		map[string]string{"cache-info-age": "72h", "cache-chunk-clean-interval": "15m"})
+	defer runInstance.cleanupFs(t, rootFs, boltDb)
+
+	if runInstance.rootIsCrypt {
+		t.Skipf("skipping crypt")
+	}
+
+	cfs, err := runInstance.getCacheFs(rootFs)
+	require.NoError(t, err)
+
+	err = cfs.UnWrap().Mkdir("test")
+	require.NoError(t, err)
+	for i := 1; i <= 4; i++ {
+		err = cfs.UnWrap().Mkdir(fmt.Sprintf("test/dir%d", i))
+		require.NoError(t, err)
+
+		for j := 1; j <= 4; j++ {
+			err = cfs.UnWrap().Mkdir(fmt.Sprintf("test/dir%d/dir%d", i, j))
+			require.NoError(t, err)
+
+			runInstance.writeObjectString(t, cfs.UnWrap(), fmt.Sprintf("test/dir%d/dir%d/test.txt", i, j), "test")
+		}
+	}
+
+	di, err := runInstance.list(t, rootFs, "test/dir1/dir2")
+	require.NoError(t, err)
+	log.Printf("len: %v", len(di))
+	require.Len(t, di, 1)
+
+	time.Sleep(time.Second * 30)
+
+	di, err = runInstance.list(t, rootFs, "test/dir1/dir2")
+	require.NoError(t, err)
+	log.Printf("len: %v", len(di))
+	require.Len(t, di, 1)
+
+	di, err = runInstance.list(t, rootFs, "test/dir1")
+	require.NoError(t, err)
+	log.Printf("len: %v", len(di))
+	require.Len(t, di, 4)
+
+	di, err = runInstance.list(t, rootFs, "test")
+	require.NoError(t, err)
+	log.Printf("len: %v", len(di))
+	require.Len(t, di, 4)
 }
 
 func TestInternalUploadTempDirCreated(t *testing.T) {
@@ -1418,7 +1526,7 @@ func (r *run) randomReader(t *testing.T, size int64) io.ReadCloser {
 	}
 	data := r.randomBytes(t, int64(left))
 	_, _ = f.Write(data)
-	_, _ = f.Seek(int64(0), 0)
+	_, _ = f.Seek(int64(0), io.SeekStart)
 	r.tempFiles = append(r.tempFiles, f)
 
 	return f
@@ -1545,7 +1653,7 @@ func (r *run) readDataFromRemote(t *testing.T, f fs.Fs, remote string, offset, e
 		if err != nil {
 			return checkSample, err
 		}
-		_, _ = f.Seek(offset, 0)
+		_, _ = f.Seek(offset, io.SeekStart)
 		totalRead, err := io.ReadFull(f, checkSample)
 		checkSample = checkSample[:totalRead]
 		if err == io.EOF || err == io.ErrUnexpectedEOF {

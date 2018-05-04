@@ -1,20 +1,19 @@
-// +build !plan9,go1.7
+// +build !plan9
 
 package cache
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
-
-	"os"
-
-	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/ncw/rclone/backend/crypt"
 	"github.com/ncw/rclone/fs"
@@ -22,10 +21,10 @@ import (
 	"github.com/ncw/rclone/fs/config/flags"
 	"github.com/ncw/rclone/fs/config/obscure"
 	"github.com/ncw/rclone/fs/hash"
+	"github.com/ncw/rclone/fs/rc"
 	"github.com/ncw/rclone/fs/walk"
 	"github.com/ncw/rclone/lib/atexit"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 	"golang.org/x/time/rate"
 )
 
@@ -336,6 +335,9 @@ func NewFs(name, rootPath string) (fs.Fs, error) {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGHUP)
 	atexit.Register(func() {
+		if plexURL != "" {
+			f.plexConnector.closeWebsocket()
+		}
 		f.StopBackgroundRunners()
 	})
 	go func() {
@@ -418,12 +420,112 @@ func NewFs(name, rootPath string) (fs.Fs, error) {
 	// even if the wrapped fs doesn't support it, we still want it
 	f.features.DirCacheFlush = f.DirCacheFlush
 
+	rc.Add(rc.Call{
+		Path:  "cache/expire",
+		Fn:    f.httpExpireRemote,
+		Title: "Purge a remote from cache",
+		Help: `
+Purge a remote from the cache backend. Supports either a directory or a file.
+Params:
+  - remote = path to remote (required)
+  - withData = true/false to delete cached data (chunks) as well (optional)
+
+Eg
+
+    rclone rc cache/expire remote=path/to/sub/folder/
+    rclone rc cache/expire remote=/ withData=true 
+`,
+	})
+
+	rc.Add(rc.Call{
+		Path:  "cache/stats",
+		Fn:    f.httpStats,
+		Title: "Get cache stats",
+		Help: `
+Show statistics for the cache remote.
+`,
+	})
+
 	return f, fsErr
+}
+
+func (f *Fs) httpStats(in rc.Params) (out rc.Params, err error) {
+	out = make(rc.Params)
+	m, err := f.Stats()
+	if err != nil {
+		return out, errors.Errorf("error while getting cache stats")
+	}
+	out["status"] = "ok"
+	out["stats"] = m
+	return out, nil
+}
+
+func (f *Fs) httpExpireRemote(in rc.Params) (out rc.Params, err error) {
+	out = make(rc.Params)
+	remoteInt, ok := in["remote"]
+	if !ok {
+		return out, errors.Errorf("remote is needed")
+	}
+	remote := remoteInt.(string)
+	withData := false
+	_, ok = in["withData"]
+	if ok {
+		withData = true
+	}
+
+	// if it's wrapped by crypt we need to check what format we got
+	if cryptFs, yes := f.isWrappedByCrypt(); yes {
+		_, err := cryptFs.DecryptFileName(remote)
+		// if it failed to decrypt then it is a decrypted format and we need to encrypt it
+		if err != nil {
+			remote = cryptFs.EncryptFileName(remote)
+		}
+		// else it's an encrypted format and we can use it as it is
+	}
+
+	if !f.cache.HasEntry(path.Join(f.Root(), remote)) {
+		return out, errors.Errorf("%s doesn't exist in cache", remote)
+	}
+
+	co := NewObject(f, remote)
+	err = f.cache.GetObject(co)
+	if err != nil { // it could be a dir
+		cd := NewDirectory(f, remote)
+		err := f.cache.ExpireDir(cd)
+		if err != nil {
+			return out, errors.WithMessage(err, "error expiring directory")
+		}
+		// notify vfs too
+		f.notifyChangeUpstream(cd.Remote(), fs.EntryDirectory)
+		out["status"] = "ok"
+		out["message"] = fmt.Sprintf("cached directory cleared: %v", remote)
+		return out, nil
+	}
+	// expire the entry
+	err = f.cache.ExpireObject(co, withData)
+	if err != nil {
+		return out, errors.WithMessage(err, "error expiring file")
+	}
+	// notify vfs too
+	f.notifyChangeUpstream(co.Remote(), fs.EntryObject)
+
+	out["status"] = "ok"
+	out["message"] = fmt.Sprintf("cached file cleared: %v", remote)
+	return out, nil
 }
 
 // receiveChangeNotify is a wrapper to notifications sent from the wrapped FS about changed files
 func (f *Fs) receiveChangeNotify(forgetPath string, entryType fs.EntryType) {
-	fs.Debugf(f, "notify: expiring cache for '%v'", forgetPath)
+	if crypt, yes := f.isWrappedByCrypt(); yes {
+		decryptedPath, err := crypt.DecryptFileName(forgetPath)
+		if err == nil {
+			fs.Infof(decryptedPath, "received cache expiry notification")
+		} else {
+			fs.Infof(forgetPath, "received cache expiry notification")
+		}
+	} else {
+		fs.Infof(forgetPath, "received cache expiry notification")
+	}
 	// notify upstreams too (vfs)
 	f.notifyChangeUpstream(forgetPath, entryType)
 
@@ -431,28 +533,27 @@ func (f *Fs) receiveChangeNotify(forgetPath string, entryType fs.EntryType) {
 	if entryType == fs.EntryObject {
 		co := NewObject(f, forgetPath)
 		err := f.cache.GetObject(co)
-		if err != nil {
-			fs.Debugf(f, "ignoring change notification for non cached entry %v", co)
-			return
-		}
-		// expire the entry
-		co.CacheTs = time.Now().Add(f.fileAge * -1)
-		err = f.cache.AddObject(co)
-		if err != nil {
-			fs.Errorf(forgetPath, "notify: error expiring '%v': %v", co, err)
+		if err == nil {
+			// expire the entry
+			err = f.cache.ExpireObject(co, true)
+			if err != nil {
+				fs.Debugf(forgetPath, "notify: error expiring '%v': %v", co, err)
+			} else {
+				fs.Debugf(forgetPath, "notify: expired %v", co)
+			}
 		} else {
-			fs.Debugf(forgetPath, "notify: expired %v", co)
+			fs.Debugf(f, "ignoring change notification for non cached entry %v", co)
 		}
 		cd = NewDirectory(f, cleanPath(path.Dir(co.Remote())))
 	} else {
 		cd = NewDirectory(f, forgetPath)
-		// we expire the dir
-		err := f.cache.ExpireDir(cd)
-		if err != nil {
-			fs.Errorf(forgetPath, "notify: error expiring '%v': %v", cd, err)
-		} else {
-			fs.Debugf(forgetPath, "notify: expired '%v'", cd)
-		}
+	}
+	// we expire the dir
+	err := f.cache.ExpireDir(cd)
+	if err != nil {
+		fs.Debugf(forgetPath, "notify: error expiring '%v': %v", cd, err)
+	} else {
+		fs.Debugf(forgetPath, "notify: expired '%v'", cd)
 	}
 
 	f.notifiedMu.Lock()
@@ -644,13 +745,15 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 			fs.Debugf(dir, "list: cached object: %v", co)
 		case fs.Directory:
 			cdd := DirectoryFromOriginal(f, o)
-			// FIXME this overrides a possible expired dir
-			//err := f.cache.AddDir(cdd)
-			//if err != nil {
-			//	fs.Errorf(dir, "list: error caching dir from listing %v", o)
-			//} else {
-			//	fs.Debugf(dir, "list: cached dir: %v", cdd)
-			//}
+			// check if the dir isn't expired and add it in cache if it isn't
+			if cdd2, err := f.cache.GetDir(cdd.abs()); err != nil || time.Now().Before(cdd2.CacheTs.Add(f.fileAge)) {
+				err := f.cache.AddDir(cdd)
+				if err != nil {
+					fs.Errorf(dir, "list: error caching dir from listing %v", o)
+				} else {
+					fs.Debugf(dir, "list: cached dir: %v", cdd)
+				}
+			}
 			cachedEntries = append(cachedEntries, cdd)
 		default:
 			fs.Debugf(entry, "list: Unknown object type %T", entry)
@@ -1315,6 +1418,15 @@ func (f *Fs) CleanUp() error {
 	return do()
 }
 
+// About gets quota information from the Fs
+func (f *Fs) About() (*fs.Usage, error) {
+	do := f.Fs.Features().About
+	if do == nil {
+		return nil, errors.New("About not supported")
+	}
+	return do()
+}
+
 // Stats returns stats about the cache storage
 func (f *Fs) Stats() (map[string]map[string]interface{}, error) {
 	return f.cache.Stats()
@@ -1453,4 +1565,5 @@ var (
 	_ fs.Wrapper        = (*Fs)(nil)
 	_ fs.ListRer        = (*Fs)(nil)
 	_ fs.ChangeNotifier = (*Fs)(nil)
+	_ fs.Abouter        = (*Fs)(nil)
 )

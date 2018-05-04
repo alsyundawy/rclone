@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path"
 	"regexp"
 	"runtime"
 	"runtime/pprof"
+	"strconv"
 	"time"
 
 	"github.com/pkg/errors"
@@ -22,7 +24,6 @@ import (
 
 	"github.com/ncw/rclone/fs"
 	"github.com/ncw/rclone/fs/accounting"
-	"github.com/ncw/rclone/fs/config"
 	"github.com/ncw/rclone/fs/config/configflags"
 	"github.com/ncw/rclone/fs/config/flags"
 	"github.com/ncw/rclone/fs/filter"
@@ -30,6 +31,8 @@ import (
 	"github.com/ncw/rclone/fs/fserrors"
 	"github.com/ncw/rclone/fs/fspath"
 	fslog "github.com/ncw/rclone/fs/log"
+	"github.com/ncw/rclone/fs/rc"
+	"github.com/ncw/rclone/fs/rc/rcflags"
 	"github.com/ncw/rclone/lib/atexit"
 )
 
@@ -79,6 +82,7 @@ from various cloud storage systems and using file transfer services, such as:
   * Google Drive
   * HTTP
   * Hubic
+  * Mega
   * Microsoft Azure Blob Storage
   * Microsoft OneDrive
   * Openstack Swift / Rackspace cloud files / Memset Memstore
@@ -126,6 +130,7 @@ func init() {
 	// Add global flags
 	configflags.AddFlags(pflag.CommandLine)
 	filterflags.AddFlags(pflag.CommandLine)
+	rcflags.AddFlags(pflag.CommandLine)
 
 	Root.Run = runRoot
 	Root.Flags().BoolVarP(&version, "version", "V", false, "Print the version number")
@@ -139,10 +144,10 @@ func ShowVersion() {
 	fmt.Printf("- go version: %s\n", runtime.Version())
 }
 
-// newFsFile creates a dst Fs from a name but may point to a file.
+// NewFsFile creates a dst Fs from a name but may point to a file.
 //
 // It returns a string with the file name if points to a file
-func newFsFile(remote string) (fs.Fs, string) {
+func NewFsFile(remote string) (fs.Fs, string) {
 	fsInfo, configName, fsPath, err := fs.ParseRemote(remote)
 	if err != nil {
 		fs.CountError(err)
@@ -167,7 +172,7 @@ func newFsFile(remote string) (fs.Fs, string) {
 //
 // This can point to a file
 func newFsSrc(remote string) (fs.Fs, string) {
-	f, fileName := newFsFile(remote)
+	f, fileName := NewFsFile(remote)
 	if fileName != "" {
 		if !filter.Active.InActive() {
 			err := errors.Errorf("Can't limit to single files when using filters: %v", remote)
@@ -319,7 +324,27 @@ func Run(Retry bool, showStats bool, cmd *cobra.Command, f func() error) {
 	if showStats && (accounting.Stats.Errored() || *statsInterval > 0) {
 		accounting.Stats.Log()
 	}
-	fs.Debugf(nil, "Go routines at exit %d\n", runtime.NumGoroutine())
+	fs.Debugf(nil, "%d go routines active\n", runtime.NumGoroutine())
+
+	// dump all running go-routines
+	if fs.Config.Dump&fs.DumpGoRoutines != 0 {
+		err = pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
+		if err != nil {
+			fs.Errorf(nil, "Failed to dump goroutines: %v", err)
+		}
+	}
+
+	// dump open files
+	if fs.Config.Dump&fs.DumpOpenFiles != 0 {
+		c := exec.Command("lsof", "-p", strconv.Itoa(os.Getpid()))
+		c.Stdout = os.Stdout
+		c.Stderr = os.Stderr
+		err = c.Run()
+		if err != nil {
+			fs.Errorf(nil, "Failed to list open files: %v", err)
+		}
+	}
+
 	if accounting.Stats.Errored() {
 		resolveExitCode(accounting.Stats.GetLastError())
 	}
@@ -329,7 +354,7 @@ func Run(Retry bool, showStats bool, cmd *cobra.Command, f func() error) {
 func CheckArgs(MinArgs, MaxArgs int, cmd *cobra.Command, args []string) {
 	if len(args) < MinArgs {
 		_ = cmd.Usage()
-		fmt.Fprintf(os.Stderr, "Command %s needs %d arguments mininum\n", cmd.Name(), MinArgs)
+		fmt.Fprintf(os.Stderr, "Command %s needs %d arguments minimum\n", cmd.Name(), MinArgs)
 		// os.Exit(1)
 		resolveExitCode(errorNotEnoughArguments)
 	} else if len(args) > MaxArgs {
@@ -370,9 +395,6 @@ func initConfig() {
 	// Finish parsing any command line flags
 	configflags.SetFlags()
 
-	// Load the rest of the config now we have started the logger
-	config.LoadConfig()
-
 	// Load filters
 	var err error
 	filter.Active, err = filter.NewFilter(&filterflags.Opt)
@@ -382,6 +404,9 @@ func initConfig() {
 
 	// Write the args for debug purposes
 	fs.Debugf("rclone", "Version %q starting with parameters %q", fs.Version, os.Args)
+
+	// Start the remote control if configured
+	rc.Start(&rcflags.Opt)
 
 	// Setup CPU profiling if desired
 	if *cpuProfile != "" {
