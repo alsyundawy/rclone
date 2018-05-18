@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"regexp"
 	"strings"
 	"time"
 
@@ -279,9 +278,6 @@ func (f *Fs) String() string {
 func (f *Fs) Features() *fs.Features {
 	return f.features
 }
-
-// Pattern to match a one drive path
-var matcher = regexp.MustCompile(`^([^/]*)(.*)$`)
 
 // parsePath parses an one drive 'url'
 func parsePath(path string) (root string) {
@@ -1306,6 +1302,11 @@ func (o *Object) MimeType() string {
 	return o.mimeType
 }
 
+// ID returns the ID of the Object if known, or "" if not
+func (o *Object) ID() string {
+	return o.id
+}
+
 // Check the interfaces are satisfied
 var (
 	_ fs.Fs     = (*Fs)(nil)
@@ -1317,4 +1318,5 @@ var (
 	_ fs.Abouter         = (*Fs)(nil)
 	_ fs.Object          = (*Object)(nil)
 	_ fs.MimeTyper       = &Object{}
+	_ fs.IDer            = &Object{}
 )

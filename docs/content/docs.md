@@ -37,6 +37,7 @@ See the following for detailed instructions for
   * [Microsoft Azure Blob Storage](/azureblob/)
   * [Microsoft OneDrive](/onedrive/)
   * [Openstack Swift / Rackspace Cloudfiles / Memset Memstore](/swift/)
+  * [OpenDrive](/opendrive/)
   * [Pcloud](/pcloud/)
   * [QingStor](/qingstor/)
   * [SFTP](/sftp/)
@@ -535,6 +536,15 @@ Note that if you use this with `sync` and `--delete-excluded` the
 files not recursed through are considered excluded and will be deleted
 on the destination.  Test first with `--dry-run` if you are not sure
 what will happen.
+
+### --max-transfer=SIZE ###
+
+Rclone will stop transferring when it has reached the size specified.
+Defaults to off.
+
+When the limit is reached all transfers will stop immediately.
+
+Rclone will exit with exit code 8 if the transfer limit is reached.
 
 ### --modify-window=TIME ###
 
@@ -1090,6 +1100,7 @@ it will log a high priority message if the retry was successful.
   * `5` - Temporary error (one that more retries might fix) (Retry errors)
   * `6` - Less serious errors (like 461 errors from dropbox) (NoRetry errors)
   * `7` - Fatal error (one that more retries won't fix, like account suspended) (Fatal errors)
+  * `8` - Transfer exceeded - limit set by --max-transfer reached
 
 Environment Variables
 ---------------------

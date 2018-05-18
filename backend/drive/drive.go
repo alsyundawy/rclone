@@ -54,15 +54,16 @@ const (
 // Globals
 var (
 	// Flags
-	driveAuthOwnerOnly  = flags.BoolP("drive-auth-owner-only", "", false, "Only consider files owned by the authenticated user.")
-	driveUseTrash       = flags.BoolP("drive-use-trash", "", true, "Send files to the trash instead of deleting permanently.")
-	driveSkipGdocs      = flags.BoolP("drive-skip-gdocs", "", false, "Skip google documents in all listings.")
-	driveSharedWithMe   = flags.BoolP("drive-shared-with-me", "", false, "Only show files that are shared with me")
-	driveTrashedOnly    = flags.BoolP("drive-trashed-only", "", false, "Only show files that are in the trash")
-	driveExtensions     = flags.StringP("drive-formats", "", defaultExtensions, "Comma separated list of preferred formats for downloading Google docs.")
-	driveUseCreatedDate = flags.BoolP("drive-use-created-date", "", false, "Use created date instead of modified date.")
-	driveListChunk      = flags.Int64P("drive-list-chunk", "", 1000, "Size of listing chunk 100-1000. 0 to disable.")
-	driveImpersonate    = flags.StringP("drive-impersonate", "", "", "Impersonate this user when using a service account.")
+	driveAuthOwnerOnly   = flags.BoolP("drive-auth-owner-only", "", false, "Only consider files owned by the authenticated user.")
+	driveUseTrash        = flags.BoolP("drive-use-trash", "", true, "Send files to the trash instead of deleting permanently.")
+	driveSkipGdocs       = flags.BoolP("drive-skip-gdocs", "", false, "Skip google documents in all listings.")
+	driveSharedWithMe    = flags.BoolP("drive-shared-with-me", "", false, "Only show files that are shared with me")
+	driveTrashedOnly     = flags.BoolP("drive-trashed-only", "", false, "Only show files that are in the trash")
+	driveExtensions      = flags.StringP("drive-formats", "", defaultExtensions, "Comma separated list of preferred formats for downloading Google docs.")
+	driveUseCreatedDate  = flags.BoolP("drive-use-created-date", "", false, "Use created date instead of modified date.")
+	driveListChunk       = flags.Int64P("drive-list-chunk", "", 1000, "Size of listing chunk 100-1000. 0 to disable.")
+	driveImpersonate     = flags.StringP("drive-impersonate", "", "", "Impersonate this user when using a service account.")
+	driveAlternateExport = flags.BoolP("drive-alternate-export", "", false, "Use alternate export URLs for google documents export.")
 	// chunkSize is the size of the chunks created during a resumable upload and should be a power of two.
 	// 1<<18 is the minimum size supported by the Google uploader, and there is no maximum.
 	chunkSize         = fs.SizeSuffix(8 * 1024 * 1024)
@@ -399,7 +400,7 @@ func configTeamDrive(name string) error {
 	} else {
 		fmt.Printf("Change current team drive ID %q?\n", teamDrive)
 	}
-	if !config.Confirm() {
+	if !config.ConfirmWithDefault(false) {
 		return nil
 	}
 	client, err := createOAuthClient(name)
@@ -757,6 +758,18 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 			}
 			obj := o.(*Object)
 			obj.url = fmt.Sprintf("%sfiles/%s/export?mimeType=%s", f.svc.BasePath, item.Id, url.QueryEscape(exportMimeType))
+			if *driveAlternateExport {
+				switch item.MimeType {
+				case "application/vnd.google-apps.drawing":
+					obj.url = fmt.Sprintf("https://docs.google.com/drawings/d/%s/export/%s", item.Id, extension)
+				case "application/vnd.google-apps.document":
+					obj.url = fmt.Sprintf("https://docs.google.com/document/d/%s/export?format=%s", item.Id, extension)
+				case "application/vnd.google-apps.spreadsheet":
+					obj.url = fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/export?format=%s", item.Id, extension)
+				case "application/vnd.google-apps.presentation":
+					obj.url = fmt.Sprintf("https://docs.google.com/presentation/d/%s/export/%s", item.Id, extension)
+				}
+			}
 			obj.isDocument = true
 			obj.mimeType = exportMimeType
 			obj.bytes = -1
@@ -1327,7 +1340,12 @@ func (f *Fs) changeNotifyRunner(notifyFunc func(string, fs.EntryType), pollInter
 				continue
 			}
 
-			if change.File != nil && change.File.MimeType != driveFolderType {
+			if change.File != nil {
+				changeType := fs.EntryDirectory
+				if change.File.MimeType != driveFolderType {
+					changeType = fs.EntryObject
+				}
+
 				// translate the parent dir of this object
 				if len(change.File.Parents) > 0 {
 					if path, ok := f.dirCache.GetInv(change.File.Parents[0]); ok {
@@ -1338,10 +1356,10 @@ func (f *Fs) changeNotifyRunner(notifyFunc func(string, fs.EntryType), pollInter
 							path = change.File.Name
 						}
 						// this will now clear the actual file too
-						pathsToClear = append(pathsToClear, entryType{path: path, entryType: fs.EntryObject})
+						pathsToClear = append(pathsToClear, entryType{path: path, entryType: changeType})
 					}
 				} else { // a true root object that is changed
-					pathsToClear = append(pathsToClear, entryType{path: change.File.Name, entryType: fs.EntryObject})
+					pathsToClear = append(pathsToClear, entryType{path: change.File.Name, entryType: changeType})
 				}
 			}
 		}
@@ -1660,6 +1678,11 @@ func (o *Object) MimeType() string {
 	return o.mimeType
 }
 
+// ID returns the ID of the Object if known, or "" if not
+func (o *Object) ID() string {
+	return o.id
+}
+
 // Check the interfaces are satisfied
 var (
 	_ fs.Fs              = (*Fs)(nil)
@@ -1677,4 +1700,5 @@ var (
 	_ fs.Abouter         = (*Fs)(nil)
 	_ fs.Object          = (*Object)(nil)
 	_ fs.MimeTyper       = (*Object)(nil)
+	_ fs.IDer            = (*Object)(nil)
 )

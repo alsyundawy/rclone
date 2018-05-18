@@ -137,6 +137,11 @@ var (
 			SubDir:   false,
 			FastList: false,
 		},
+		{
+			Name:     "TestOpenDrive:",
+			SubDir:   false,
+			FastList: false,
+		},
 	}
 	// Flags
 	maxTries = flag.Int("maxtries", 5, "Number of times to try each test")
@@ -277,7 +282,6 @@ func (t *test) cleanFs() error {
 		remote := dir.Remote()
 		if fstest.MatchTestRemote.MatchString(remote) {
 			log.Printf("Purging %s%s", t.remote, remote)
-			time.Sleep(2500 * time.Millisecond) // sleep to rate limit bucket deletes for gcs
 			dir, err := fs.NewFs(t.remote + remote)
 			if err != nil {
 				return err

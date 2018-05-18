@@ -19,12 +19,12 @@ package webdav
 // For example the ownCloud WebDAV server does it that way.
 
 import (
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"path"
-	"regexp"
 	"strings"
 	"time"
 
@@ -117,7 +117,6 @@ type Object struct {
 	hasMetaData bool      // whether info below has been set
 	size        int64     // size of the object
 	modTime     time.Time // modification time of the object
-	id          string    // ID of the object
 	sha1        string    // SHA-1 of the object content
 }
 
@@ -141,15 +140,6 @@ func (f *Fs) String() string {
 // Features returns the optional features of this Fs
 func (f *Fs) Features() *fs.Features {
 	return f.features
-}
-
-// Pattern to match a webdav path
-var matcher = regexp.MustCompile(`^([^/]*)(.*)$`)
-
-// parsePath parses an webdav 'url'
-func parsePath(path string) (root string) {
-	root = strings.Trim(path, "/")
-	return
 }
 
 // retryErrorCodes is a slice of error codes that we will retry
@@ -189,6 +179,9 @@ func (f *Fs) readMetaDataForPath(path string) (info *api.Prop, err error) {
 	opts := rest.Opts{
 		Method: "PROPFIND",
 		Path:   f.filePath(path),
+		ExtraHeaders: map[string]string{
+			"Depth": "1",
+		},
 	}
 	var result api.Multistatus
 	var resp *http.Response
@@ -220,11 +213,16 @@ func (f *Fs) readMetaDataForPath(path string) (info *api.Prop, err error) {
 
 // errorHandler parses a non 2xx error response into an error
 func errorHandler(resp *http.Response) error {
+	body, err := rest.ReadBody(resp)
+	if err != nil {
+		return errors.Wrap(err, "error when trying to read error from body")
+	}
 	// Decode error response
 	errResponse := new(api.Error)
-	err := rest.DecodeXML(resp, &errResponse)
+	err = xml.Unmarshal(body, &errResponse)
 	if err != nil {
-		fs.Debugf(nil, "Couldn't decode error response: %v", err)
+		// set the Message to be the body if can't parse the XML
+		errResponse.Message = strings.TrimSpace(string(body))
 	}
 	errResponse.Status = resp.Status
 	errResponse.StatusCode = resp.StatusCode
@@ -568,7 +566,7 @@ func (f *Fs) mkdir(dirPath string) error {
 	})
 	if apiErr, ok := err.(*api.Error); ok {
 		// already exists
-		if apiErr.StatusCode == http.StatusMethodNotAllowed {
+		if apiErr.StatusCode == http.StatusMethodNotAllowed || apiErr.StatusCode == http.StatusNotAcceptable {
 			return nil
 		}
 		// parent does not exists

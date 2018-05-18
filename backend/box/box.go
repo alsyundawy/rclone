@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -134,9 +133,6 @@ func (f *Fs) String() string {
 func (f *Fs) Features() *fs.Features {
 	return f.features
 }
-
-// Pattern to match a box path
-var matcher = regexp.MustCompile(`^([^/]*)(.*)$`)
 
 // parsePath parses an box 'url'
 func parsePath(path string) (root string) {
@@ -1052,6 +1048,11 @@ func (o *Object) Remove() error {
 	return o.fs.deleteObject(o.id)
 }
 
+// ID returns the ID of the Object if known, or "" if not
+func (o *Object) ID() string {
+	return o.id
+}
+
 // Check the interfaces are satisfied
 var (
 	_ fs.Fs              = (*Fs)(nil)
@@ -1062,4 +1063,5 @@ var (
 	_ fs.DirMover        = (*Fs)(nil)
 	_ fs.DirCacheFlusher = (*Fs)(nil)
 	_ fs.Object          = (*Object)(nil)
+	_ fs.IDer            = (*Object)(nil)
 )
