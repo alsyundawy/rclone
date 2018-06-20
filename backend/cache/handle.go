@@ -147,10 +147,9 @@ func (r *Handle) scaleWorkers(desired int) {
 
 func (r *Handle) confirmExternalReading() {
 	// if we have a max value of workers
-	// or there's no external confirmation available
 	// then we skip this step
 	if len(r.workers) > 1 ||
-		!r.cacheFs().plexConnector.isConnected() {
+		!r.cacheFs().plexConnector.isConfigured() {
 		return
 	}
 	if !r.cacheFs().plexConnector.isPlaying(r.cachedObject) {
