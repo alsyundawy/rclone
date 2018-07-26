@@ -18,24 +18,16 @@
   version = "v0.23.0"
 
 [[projects]]
-  name = "github.com/Azure/azure-sdk-for-go"
-  packages = [
-    "storage",
-    "version"
-  ]
-  revision = "cd93ccfe0395e70031704ca68f14606588eec120"
-  version = "v17.3.0"
+  name = "github.com/Azure/azure-pipeline-go"
+  packages = ["pipeline"]
+  revision = "7571e8eb0876932ab505918ff7ed5107773e5ee2"
+  version = "0.1.7"
 
 [[projects]]
-  name = "github.com/Azure/go-autorest"
-  packages = [
-    "autorest",
-    "autorest/adal",
-    "autorest/azure",
-    "autorest/date"
-  ]
-  revision = "f04d503958a4fe854c1b41667c73f8813c9dd9c3"
-  version = "v10.11.2"
+  branch = "master"
+  name = "github.com/Azure/azure-storage-blob-go"
+  packages = ["2018-03-28/azblob"]
+  revision = "eaae161d9d5e07363f04ddb19d84d57efc66d1a1"
 
 [[projects]]
   branch = "master"
@@ -125,12 +117,6 @@
   version = "v1.1.0"
 
 [[projects]]
-  name = "github.com/dgrijalva/jwt-go"
-  packages = ["."]
-  revision = "06ea1031745cb8b3dab3f6a236daf2b0aa468b7e"
-  version = "v3.2.0"
-
-[[projects]]
   name = "github.com/djherbis/times"
   packages = ["."]
   revision = "95292e44976d1217cf3611dc7c8d9466877d3ed5"
@@ -200,12 +186,6 @@
   packages = ["."]
   revision = "1455def202f6e05b95cc7bfc7e8ae67ae5141eba"
   version = "v0.1.0"
-
-[[projects]]
-  name = "github.com/marstr/guid"
-  packages = ["."]
-  revision = "8bd9a64bf37eb297b492a4101fb28e80ac0b290f"
-  version = "v1.1.0"
 
 [[projects]]
   name = "github.com/mattn/go-runewidth"
@@ -286,12 +266,6 @@
   version = "v1.5.1"
 
 [[projects]]
-  name = "github.com/satori/go.uuid"
-  packages = ["."]
-  revision = "f58768cc1a7a7e77a3bd49e98cdd21419399b6a3"
-  version = "v1.2.0"
-
-[[projects]]
   branch = "master"
   name = "github.com/sevlyar/go-daemon"
   packages = ["."]
@@ -331,7 +305,7 @@
   branch = "master"
   name = "github.com/t3rm1n4l/go-mega"
   packages = ["."]
-  revision = "3ba49835f4db01d6329782cbdc7a0a8bb3a26c5f"
+  revision = "57978a63bd3f91fa7e188b751a7e7e6dd4e33813"
 
 [[projects]]
   branch = "master"
@@ -470,7 +444,6 @@
     "internal/modules",
     "internal/remote_api",
     "internal/urlfetch",
-    "log",
     "urlfetch"
   ]
   revision = "b1f26356af11148e710935ed1ac8a7f5702c7612"
@@ -485,6 +458,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "c1378c5fc821e27711155958ff64b3c74b56818ba4733dbfe0c86d518c32880e"
+  inputs-digest = "670cdb55138aa1394b4c8f87345e9be9c8105248edda4be7176dddee2a4f5d26"
   solver-name = "gps-cdcl"
   solver-version = 1
