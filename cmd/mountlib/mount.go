@@ -10,6 +10,7 @@ import (
 
 	"github.com/ncw/rclone/cmd"
 	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/config"
 	"github.com/ncw/rclone/fs/config/flags"
 	"github.com/ncw/rclone/vfs"
 	"github.com/ncw/rclone/vfs/vfsflags"
@@ -216,6 +217,11 @@ be copied to the vfs cache before opening with --vfs-cache-mode full.
 ` + vfs.Help,
 		Run: func(command *cobra.Command, args []string) {
 			cmd.CheckArgs(2, 2, command, args)
+
+			if Daemon {
+				config.PassConfigKeyForDaemonization = true
+			}
+
 			fdst := cmd.NewFsDir(args)
 
 			// Show stats if the user has specifically requested them
@@ -286,4 +292,23 @@ be copied to the vfs cache before opening with --vfs-cache-mode full.
 	vfsflags.AddFlags(flagSet)
 
 	return commandDefintion
+}
+
+// ClipBlocks clips the blocks pointed to to the OS max
+func ClipBlocks(b *uint64) {
+	var max uint64
+	switch runtime.GOOS {
+	case "windows":
+		max = (1 << 43) - 1
+	case "darwin":
+		// OSX FUSE only supports 32 bit number of blocks
+		// https://github.com/osxfuse/osxfuse/issues/396
+		max = (1 << 32) - 1
+	default:
+		// no clipping
+		return
+	}
+	if *b > max {
+		*b = max
+	}
 }

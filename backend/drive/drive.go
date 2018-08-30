@@ -8,6 +8,7 @@ package drive
 // * files with / in name
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -29,6 +30,7 @@ import (
 	"github.com/ncw/rclone/fs/fserrors"
 	"github.com/ncw/rclone/fs/fshttp"
 	"github.com/ncw/rclone/fs/hash"
+	"github.com/ncw/rclone/fs/walk"
 	"github.com/ncw/rclone/lib/dircache"
 	"github.com/ncw/rclone/lib/oauthutil"
 	"github.com/ncw/rclone/lib/pacer"
@@ -66,29 +68,29 @@ var (
 		RedirectURL:  oauthutil.TitleBarRedirectURL,
 	}
 	mimeTypeToExtension = map[string]string{
-		"application/epub+zip":                                                      "epub",
-		"application/msword":                                                        "doc",
-		"application/pdf":                                                           "pdf",
-		"application/rtf":                                                           "rtf",
-		"application/vnd.ms-excel":                                                  "xls",
-		"application/vnd.oasis.opendocument.presentation":                           "odp",
-		"application/vnd.oasis.opendocument.spreadsheet":                            "ods",
-		"application/vnd.oasis.opendocument.text":                                   "odt",
+		"application/epub+zip":                            "epub",
+		"application/msword":                              "doc",
+		"application/pdf":                                 "pdf",
+		"application/rtf":                                 "rtf",
+		"application/vnd.ms-excel":                        "xls",
+		"application/vnd.oasis.opendocument.presentation": "odp",
+		"application/vnd.oasis.opendocument.spreadsheet":  "ods",
+		"application/vnd.oasis.opendocument.text":         "odt",
 		"application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
 		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":         "xlsx",
 		"application/vnd.openxmlformats-officedocument.wordprocessingml.document":   "docx",
 		"application/x-vnd.oasis.opendocument.spreadsheet":                          "ods",
-		"application/zip":                                                           "zip",
-		"image/jpeg":                                                                "jpg",
-		"image/png":                                                                 "png",
-		"image/svg+xml":                                                             "svg",
-		"text/csv":                                                                  "csv",
-		"text/html":                                                                 "html",
-		"text/plain":                                                                "txt",
-		"text/tab-separated-values":                                                 "tsv",
+		"application/zip":           "zip",
+		"image/jpeg":                "jpg",
+		"image/png":                 "png",
+		"image/svg+xml":             "svg",
+		"text/csv":                  "csv",
+		"text/html":                 "html",
+		"text/plain":                "txt",
+		"text/tab-separated-values": "tsv",
 	}
 	extensionToMimeType map[string]string
-	partialFields       = "id,name,size,md5Checksum,trashed,modifiedTime,createdTime,mimeType"
+	partialFields       = "id,name,size,md5Checksum,trashed,modifiedTime,createdTime,mimeType,parents"
 	exportFormatsOnce   sync.Once           // make sure we fetch the export formats only once
 	_exportFormats      map[string][]string // allowed export mime-type conversions
 )
@@ -359,12 +361,21 @@ func parseDrivePath(path string) (root string, err error) {
 // Should return true to finish processing
 type listFn func(*drive.File) bool
 
+func containsString(slice []string, s string) bool {
+	for _, e := range slice {
+		if e == s {
+			return true
+		}
+	}
+	return false
+}
+
 // Lists the directory required calling the user function on each item found
 //
 // If the user fn ever returns true then it early exits with found = true
 //
 // Search params: https://developers.google.com/drive/search-parameters
-func (f *Fs) list(dirID string, title string, directoriesOnly bool, filesOnly bool, includeAll bool, fn listFn) (found bool, err error) {
+func (f *Fs) list(dirIDs []string, title string, directoriesOnly bool, filesOnly bool, includeAll bool, fn listFn) (found bool, err error) {
 	var query []string
 	if !includeAll {
 		q := "trashed=" + strconv.FormatBool(f.opt.TrashedOnly)
@@ -376,19 +387,42 @@ func (f *Fs) list(dirID string, title string, directoriesOnly bool, filesOnly bo
 	// Search with sharedWithMe will always return things listed in "Shared With Me" (without any parents)
 	// We must not filter with parent when we try list "ROOT" with drive-shared-with-me
 	// If we need to list file inside those shared folders, we must search it without sharedWithMe
-	if f.opt.SharedWithMe && dirID == f.rootFolderID {
-		query = append(query, "sharedWithMe=true")
+	parentsQuery := bytes.NewBufferString("(")
+	for _, dirID := range dirIDs {
+		if dirID == "" {
+			continue
+		}
+		if parentsQuery.Len() > 1 {
+			_, _ = parentsQuery.WriteString(" or ")
+		}
+		if f.opt.SharedWithMe && dirID == f.rootFolderID {
+			_, _ = parentsQuery.WriteString("sharedWithMe=true")
+		} else {
+			_, _ = fmt.Fprintf(parentsQuery, "'%s' in parents", dirID)
+		}
 	}
-	if dirID != "" && !(f.opt.SharedWithMe && dirID == f.rootFolderID) {
-		query = append(query, fmt.Sprintf("'%s' in parents", dirID))
+	if parentsQuery.Len() > 1 {
+		_ = parentsQuery.WriteByte(')')
+		query = append(query, parentsQuery.String())
 	}
+	stem := ""
 	if title != "" {
 		// Escaping the backslash isn't documented but seems to work
 		searchTitle := strings.Replace(title, `\`, `\\`, -1)
 		searchTitle = strings.Replace(searchTitle, `'`, `\'`, -1)
 		// Convert ／ to / for search
 		searchTitle = strings.Replace(searchTitle, "／", "/", -1)
-		query = append(query, fmt.Sprintf("name='%s'", searchTitle))
+
+		handleGdocs := !directoriesOnly && !f.opt.SkipGdocs
+		// if the search title contains an extension and the extension is in the export extensions add a search
+		// for the filename without the extension.
+		// assume that export extensions don't contain escape sequences and only have one part (not .tar.gz)
+		if ext := path.Ext(searchTitle); handleGdocs && len(ext) > 0 && containsString(f.extensions, ext[1:]) {
+			stem = title[:len(title)-len(ext)]
+			query = append(query, fmt.Sprintf("(name='%s' or name='%s')", searchTitle, searchTitle[:len(title)-len(ext)]))
+		} else {
+			query = append(query, fmt.Sprintf("name='%s'", searchTitle))
+		}
 	}
 	if directoriesOnly {
 		query = append(query, fmt.Sprintf("mimeType='%s'", driveFolderType))
@@ -438,8 +472,15 @@ OUTER:
 			item.Name = strings.Replace(item.Name, "/", "／", -1)
 			// Check the case of items is correct since
 			// the `=` operator is case insensitive.
+
 			if title != "" && title != item.Name {
-				continue
+				if stem == "" || stem != item.Name {
+					continue
+				}
+				_, exportName, _, _ := f.findExportFormat(item)
+				if exportName == "" || exportName != title {
+					continue
+				}
 			}
 			if fn(item) {
 				found = true
@@ -665,23 +706,17 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 			// No root so return old f
 			return f, nil
 		}
-		entries, err := tempF.List("")
+		_, err := tempF.NewObject(remote)
 		if err != nil {
 			// unable to list folder so return old f
 			return f, nil
 		}
-		for _, e := range entries {
-			if _, isObject := e.(fs.Object); isObject && e.Remote() == remote {
-				// XXX: update the old f here instead of returning tempF, since
-				// `features` were already filled with functions having *f as a receiver.
-				// See https://github.com/ncw/rclone/issues/2182
-				f.dirCache = tempF.dirCache
-				f.root = tempF.root
-				return f, fs.ErrorIsFile
-			}
-		}
-		// File doesn't exist so return old f
-		return f, nil
+		// XXX: update the old f here instead of returning tempF, since
+		// `features` were already filled with functions having *f as a receiver.
+		// See https://github.com/ncw/rclone/issues/2182
+		f.dirCache = tempF.dirCache
+		f.root = tempF.root
+		return f, fs.ErrorIsFile
 	}
 	// fmt.Printf("Root id %s", f.dirCache.RootID())
 	return f, nil
@@ -715,10 +750,17 @@ func (f *Fs) NewObject(remote string) (fs.Object, error) {
 // FindLeaf finds a directory of name leaf in the folder with ID pathID
 func (f *Fs) FindLeaf(pathID, leaf string) (pathIDOut string, found bool, err error) {
 	// Find the leaf in pathID
-	found, err = f.list(pathID, leaf, true, false, false, func(item *drive.File) bool {
+	found, err = f.list([]string{pathID}, leaf, true, false, false, func(item *drive.File) bool {
 		if item.Name == leaf {
 			pathIDOut = item.Id
 			return true
+		}
+		if !f.opt.SkipGdocs {
+			_, exportName, _, _ := f.findExportFormat(item)
+			if exportName == leaf {
+				pathIDOut = item.Id
+				return true
+			}
 		}
 		return false
 	})
@@ -783,18 +825,21 @@ func (f *Fs) exportFormats() map[string][]string {
 //
 // Look through the extensions and find the first format that can be
 // converted.  If none found then return "", ""
-func (f *Fs) findExportFormat(filepath string, exportMimeTypes []string) (extension, mimeType string) {
-	for _, extension := range f.extensions {
-		mimeType := extensionToMimeType[extension]
-		for _, emt := range exportMimeTypes {
-			if emt == mimeType {
-				return extension, mimeType
+func (f *Fs) findExportFormat(item *drive.File) (extension, filename, mimeType string, isDocument bool) {
+	exportMimeTypes, isDocument := f.exportFormats()[item.MimeType]
+	if isDocument {
+		for _, extension := range f.extensions {
+			mimeType := extensionToMimeType[extension]
+			for _, emt := range exportMimeTypes {
+				if emt == mimeType {
+					return extension, fmt.Sprintf("%s.%s", item.Name, extension), mimeType, true
+				}
 			}
 		}
 	}
 
 	// else return empty
-	return "", ""
+	return "", "", "", isDocument
 }
 
 // List the objects and directories in dir into entries.  The
@@ -817,62 +862,13 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 	}
 
 	var iErr error
-	_, err = f.list(directoryID, "", false, false, false, func(item *drive.File) bool {
-		remote := path.Join(dir, item.Name)
-		switch {
-		case item.MimeType == driveFolderType:
-			// cache the directory ID for later lookups
-			f.dirCache.Put(remote, item.Id)
-			when, _ := time.Parse(timeFormatIn, item.ModifiedTime)
-			d := fs.NewDir(remote, when).SetID(item.Id)
-			entries = append(entries, d)
-		case f.opt.AuthOwnerOnly && !isAuthOwned(item):
-			// ignore object
-		case item.Md5Checksum != "" || item.Size > 0:
-			// If item has MD5 sum or a length it is a file stored on drive
-			o, err := f.newObjectWithInfo(remote, item)
-			if err != nil {
-				iErr = err
-				return true
-			}
-			entries = append(entries, o)
-		case f.opt.SkipGdocs:
-			fs.Debugf(remote, "Skipping google document type %q", item.MimeType)
-		default:
-			exportMimeTypes, isDocument := f.exportFormats()[item.MimeType]
-			if !isDocument {
-				fs.Debugf(remote, "Ignoring unknown document type %q", item.MimeType)
-				break
-			}
-			// If item has export links then it is a google doc
-			extension, exportMimeType := f.findExportFormat(remote, exportMimeTypes)
-			if extension == "" {
-				fs.Debugf(remote, "No export formats found for %q", item.MimeType)
-				break
-			}
-			o, err := f.newObjectWithInfo(remote+"."+extension, item)
-			if err != nil {
-				iErr = err
-				return true
-			}
-			obj := o.(*Object)
-			obj.url = fmt.Sprintf("%sfiles/%s/export?mimeType=%s", f.svc.BasePath, item.Id, url.QueryEscape(exportMimeType))
-			if f.opt.AlternateExport {
-				switch item.MimeType {
-				case "application/vnd.google-apps.drawing":
-					obj.url = fmt.Sprintf("https://docs.google.com/drawings/d/%s/export/%s", item.Id, extension)
-				case "application/vnd.google-apps.document":
-					obj.url = fmt.Sprintf("https://docs.google.com/document/d/%s/export?format=%s", item.Id, extension)
-				case "application/vnd.google-apps.spreadsheet":
-					obj.url = fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/export?format=%s", item.Id, extension)
-				case "application/vnd.google-apps.presentation":
-					obj.url = fmt.Sprintf("https://docs.google.com/presentation/d/%s/export/%s", item.Id, extension)
-				}
-			}
-			obj.isDocument = true
-			obj.mimeType = exportMimeType
-			obj.bytes = -1
-			entries = append(entries, o)
+	_, err = f.list([]string{directoryID}, "", false, false, false, func(item *drive.File) bool {
+		entry, err := f.itemToDirEntry(path.Join(dir, item.Name), item)
+		if err != nil {
+			return true
+		}
+		if entry != nil {
+			entries = append(entries, entry)
 		}
 		return false
 	})
@@ -883,6 +879,233 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 		return nil, iErr
 	}
 	return entries, nil
+}
+
+// listRRunner will read dirIDs from the in channel, perform the file listing an call cb with each DirEntry.
+//
+// In each cycle, will wait up to 10ms to read up to grouping entries from the in channel.
+// If an error occurs it will be send to the out channel and then return. Once the in channel is closed,
+// nil is send to the out channel and the function returns.
+func (f *Fs) listRRunner(wg *sync.WaitGroup, in <-chan string, out chan<- error, cb func(fs.DirEntry) error, grouping int) {
+	var dirs []string
+
+	for dir := range in {
+		dirs = append(dirs[:0], dir)
+		wait := time.After(10 * time.Millisecond)
+	waitloop:
+		for i := 1; i < grouping; i++ {
+			select {
+			case d, ok := <-in:
+				if !ok {
+					break waitloop
+				}
+				dirs = append(dirs, d)
+			case <-wait:
+				break waitloop
+			}
+		}
+		var iErr error
+		_, err := f.list(dirs, "", false, false, false, func(item *drive.File) bool {
+			parentPath := ""
+			if len(item.Parents) > 0 {
+				p, ok := f.dirCache.GetInv(item.Parents[0])
+				if ok {
+					parentPath = p
+				}
+			}
+			remote := path.Join(parentPath, item.Name)
+			entry, err := f.itemToDirEntry(remote, item)
+			if err != nil {
+				iErr = err
+				return true
+			}
+
+			err = cb(entry)
+			if err != nil {
+				iErr = err
+				return true
+			}
+			return false
+		})
+		for range dirs {
+			wg.Done()
+		}
+
+		if iErr != nil {
+			out <- iErr
+			return
+		}
+
+		if err != nil {
+			out <- err
+			return
+		}
+	}
+	out <- nil
+}
+
+// ListR lists the objects and directories of the Fs starting
+// from dir recursively into out.
+//
+// dir should be "" to start from the root, and should not
+// have trailing slashes.
+//
+// This should return ErrDirNotFound if the directory isn't
+// found.
+//
+// It should call callback for each tranche of entries read.
+// These need not be returned in any particular order.  If
+// callback returns an error then the listing will stop
+// immediately.
+//
+// Don't implement this unless you have a more efficient way
+// of listing recursively that doing a directory traversal.
+func (f *Fs) ListR(dir string, callback fs.ListRCallback) (err error) {
+	const (
+		grouping    = 50
+		inputBuffer = 1000
+	)
+
+	err = f.dirCache.FindRoot(false)
+	if err != nil {
+		return err
+	}
+	directoryID, err := f.dirCache.FindDir(dir, false)
+	if err != nil {
+		return err
+	}
+
+	mu := sync.Mutex{} // protects in and overflow
+	wg := sync.WaitGroup{}
+	in := make(chan string, inputBuffer)
+	out := make(chan error, fs.Config.Checkers)
+	list := walk.NewListRHelper(callback)
+	overfflow := []string{}
+
+	cb := func(entry fs.DirEntry) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if d, isDir := entry.(*fs.Dir); isDir && in != nil {
+			select {
+			case in <- d.ID():
+				wg.Add(1)
+			default:
+				overfflow = append(overfflow, d.ID())
+			}
+		}
+		return list.Add(entry)
+	}
+
+	wg.Add(1)
+	in <- directoryID
+
+	for i := 0; i < fs.Config.Checkers; i++ {
+		go f.listRRunner(&wg, in, out, cb, grouping)
+	}
+	go func() {
+		// wait until the all directories are processed
+		wg.Wait()
+		// if the input channel overflowed add the collected entries to the channel now
+		for len(overfflow) > 0 {
+			mu.Lock()
+			l := len(overfflow)
+			// only fill half of the channel to prevent entries beeing put into overfflow again
+			if l > inputBuffer/2 {
+				l = inputBuffer / 2
+			}
+			wg.Add(l)
+			for _, d := range overfflow[:l] {
+				in <- d
+			}
+			overfflow = overfflow[l:]
+			mu.Unlock()
+
+			// wait again for the completion of all directories
+			wg.Wait()
+		}
+		mu.Lock()
+		if in != nil {
+			// notify all workers to exit
+			close(in)
+			in = nil
+		}
+		mu.Unlock()
+	}()
+	// wait until the all workers to finish
+	for i := 0; i < fs.Config.Checkers; i++ {
+		e := <-out
+		mu.Lock()
+		// if one worker returns an error early, close the input so all other workers exit
+		if e != nil && in != nil {
+			err = e
+			close(in)
+			in = nil
+		}
+		mu.Unlock()
+	}
+
+	close(out)
+	if err != nil {
+		return err
+	}
+
+	return list.Flush()
+}
+
+func (f *Fs) itemToDirEntry(remote string, item *drive.File) (fs.DirEntry, error) {
+	switch {
+	case item.MimeType == driveFolderType:
+		// cache the directory ID for later lookups
+		f.dirCache.Put(remote, item.Id)
+		when, _ := time.Parse(timeFormatIn, item.ModifiedTime)
+		d := fs.NewDir(remote, when).SetID(item.Id)
+		return d, nil
+	case f.opt.AuthOwnerOnly && !isAuthOwned(item):
+		// ignore object
+	case item.Md5Checksum != "" || item.Size > 0:
+		// If item has MD5 sum or a length it is a file stored on drive
+		o, err := f.newObjectWithInfo(remote, item)
+		if err != nil {
+			return nil, err
+		}
+		return o, nil
+	case f.opt.SkipGdocs:
+		fs.Debugf(remote, "Skipping google document type %q", item.MimeType)
+	default:
+		// If item MimeType is in the ExportFormats then it is a google doc
+		extension, _, exportMimeType, isDocument := f.findExportFormat(item)
+		if !isDocument {
+			fs.Debugf(remote, "Ignoring unknown document type %q", item.MimeType)
+			break
+		}
+		if extension == "" {
+			fs.Debugf(remote, "No export formats found for %q", item.MimeType)
+			break
+		}
+		o, err := f.newObjectWithInfo(remote+"."+extension, item)
+		if err != nil {
+			return nil, err
+		}
+		obj := o.(*Object)
+		obj.url = fmt.Sprintf("%sfiles/%s/export?mimeType=%s", f.svc.BasePath, item.Id, url.QueryEscape(exportMimeType))
+		if f.opt.AlternateExport {
+			switch item.MimeType {
+			case "application/vnd.google-apps.drawing":
+				obj.url = fmt.Sprintf("https://docs.google.com/drawings/d/%s/export/%s", item.Id, extension)
+			case "application/vnd.google-apps.document":
+				obj.url = fmt.Sprintf("https://docs.google.com/document/d/%s/export?format=%s", item.Id, extension)
+			case "application/vnd.google-apps.spreadsheet":
+				obj.url = fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/export?format=%s", item.Id, extension)
+			case "application/vnd.google-apps.presentation":
+				obj.url = fmt.Sprintf("https://docs.google.com/presentation/d/%s/export/%s", item.Id, extension)
+			}
+		}
+		obj.isDocument = true
+		obj.mimeType = exportMimeType
+		obj.bytes = -1
+		return o, nil
+	}
+	return nil, nil
 }
 
 // Creates a drive.File info from the parameters passed in and a half
@@ -982,7 +1205,7 @@ func (f *Fs) MergeDirs(dirs []fs.Directory) error {
 	for _, srcDir := range dirs[1:] {
 		// list the the objects
 		infos := []*drive.File{}
-		_, err := f.list(srcDir.ID(), "", false, false, true, func(info *drive.File) bool {
+		_, err := f.list([]string{srcDir.ID()}, "", false, false, true, func(info *drive.File) bool {
 			infos = append(infos, info)
 			return false
 		})
@@ -1050,7 +1273,7 @@ func (f *Fs) Rmdir(dir string) error {
 		return err
 	}
 	var trashedFiles = false
-	found, err := f.list(directoryID, "", false, false, true, func(item *drive.File) bool {
+	found, err := f.list([]string{directoryID}, "", false, false, true, func(item *drive.File) bool {
 		if !item.Trashed {
 			fs.Debugf(dir, "Rmdir: contains file: %q", item.Name)
 			return true
@@ -1549,6 +1772,26 @@ func (o *Object) setMetaData(info *drive.File) {
 	o.mimeType = info.MimeType
 }
 
+// setGdocsMetaData only sets the gdocs related fields
+func (o *Object) setGdocsMetaData(info *drive.File, extension, exportMimeType string) {
+	o.url = fmt.Sprintf("%sfiles/%s/export?mimeType=%s", o.fs.svc.BasePath, info.Id, url.QueryEscape(exportMimeType))
+	if o.fs.opt.AlternateExport {
+		switch info.MimeType {
+		case "application/vnd.google-apps.drawing":
+			o.url = fmt.Sprintf("https://docs.google.com/drawings/d/%s/export/%s", info.Id, extension)
+		case "application/vnd.google-apps.document":
+			o.url = fmt.Sprintf("https://docs.google.com/document/d/%s/export?format=%s", info.Id, extension)
+		case "application/vnd.google-apps.spreadsheet":
+			o.url = fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/export?format=%s", info.Id, extension)
+		case "application/vnd.google-apps.presentation":
+			o.url = fmt.Sprintf("https://docs.google.com/presentation/d/%s/export/%s", info.Id, extension)
+		}
+	}
+	o.isDocument = true
+	o.mimeType = exportMimeType
+	o.bytes = -1
+}
+
 // readMetaData gets the info if it hasn't already been fetched
 func (o *Object) readMetaData() (err error) {
 	if o.id != "" {
@@ -1563,10 +1806,18 @@ func (o *Object) readMetaData() (err error) {
 		return err
 	}
 
-	found, err := o.fs.list(directoryID, leaf, false, true, false, func(item *drive.File) bool {
+	found, err := o.fs.list([]string{directoryID}, leaf, false, true, false, func(item *drive.File) bool {
 		if item.Name == leaf {
 			o.setMetaData(item)
 			return true
+		}
+		if !o.fs.opt.SkipGdocs {
+			extension, exportName, exportMimeType, _ := o.fs.findExportFormat(item)
+			if exportName == leaf {
+				o.setMetaData(item)
+				o.setGdocsMetaData(item, extension, exportMimeType)
+				return true
+			}
 		}
 		return false
 	})
@@ -1828,6 +2079,7 @@ var (
 	_ fs.ChangeNotifier  = (*Fs)(nil)
 	_ fs.PutUncheckeder  = (*Fs)(nil)
 	_ fs.PublicLinker    = (*Fs)(nil)
+	_ fs.ListRer         = (*Fs)(nil)
 	_ fs.MergeDirser     = (*Fs)(nil)
 	_ fs.Abouter         = (*Fs)(nil)
 	_ fs.Object          = (*Object)(nil)

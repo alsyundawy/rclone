@@ -84,6 +84,7 @@ from various cloud storage systems and using file transfer services, such as:
   * Google Drive
   * HTTP
   * Hubic
+  * Jottacloud
   * Mega
   * Microsoft Azure Blob Storage
   * Microsoft OneDrive
@@ -296,7 +297,9 @@ func Run(Retry bool, showStats bool, cmd *cobra.Command, f func() error) {
 	if !showStats && ShowStats() {
 		showStats = true
 	}
-	if showStats {
+	if fs.Config.Progress {
+		stopStats = startProgress()
+	} else if showStats {
 		stopStats = StartStats()
 	}
 	SigInfoHandler()

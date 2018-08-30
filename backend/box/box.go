@@ -88,13 +88,19 @@ func init() {
 			Help:     "Cutoff for switching to multipart upload.",
 			Default:  fs.SizeSuffix(defaultUploadCutoff),
 			Advanced: true,
+		}, {
+			Name:     "commit_retries",
+			Help:     "Max number of times to try committing a multipart file.",
+			Default:  100,
+			Advanced: true,
 		}},
 	})
 }
 
 // Options defines the configuration for this backend
 type Options struct {
-	UploadCutoff fs.SizeSuffix `config:"upload_cutoff"`
+	UploadCutoff  fs.SizeSuffix `config:"upload_cutoff"`
+	CommitRetries int           `config:"commit_retries"`
 }
 
 // Fs represents a remote box
@@ -668,7 +674,7 @@ func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
 		Parameters: fieldsValue(),
 	}
 	replacedLeaf := replaceReservedChars(leaf)
-	copy := api.CopyFile{
+	copyFile := api.CopyFile{
 		Name: replacedLeaf,
 		Parent: api.Parent{
 			ID: directoryID,
@@ -677,7 +683,7 @@ func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
 	var resp *http.Response
 	var info *api.Item
 	err = f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.CallJSON(&opts, &copy, &info)
+		resp, err = f.srv.CallJSON(&opts, &copyFile, &info)
 		return shouldRetry(resp, err)
 	})
 	if err != nil {
@@ -1008,8 +1014,8 @@ func (o *Object) upload(in io.Reader, leaf, directoryID string, modTime time.Tim
 	var resp *http.Response
 	var result api.FolderItems
 	opts := rest.Opts{
-		Method: "POST",
-		Body:   in,
+		Method:                "POST",
+		Body:                  in,
 		MultipartMetadataName: "attributes",
 		MultipartContentName:  "contents",
 		MultipartFileName:     upload.Name,

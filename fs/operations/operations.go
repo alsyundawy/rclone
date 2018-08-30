@@ -982,15 +982,15 @@ func Purge(f fs.Fs, dir string) error {
 // Delete removes all the contents of a container.  Unlike Purge, it
 // obeys includes and excludes.
 func Delete(f fs.Fs) error {
-	delete := make(fs.ObjectsChan, fs.Config.Transfers)
+	delChan := make(fs.ObjectsChan, fs.Config.Transfers)
 	delErr := make(chan error, 1)
 	go func() {
-		delErr <- DeleteFiles(delete)
+		delErr <- DeleteFiles(delChan)
 	}()
 	err := ListFn(f, func(o fs.Object) {
-		delete <- o
+		delChan <- o
 	})
-	close(delete)
+	close(delChan)
 	delError := <-delErr
 	if err == nil {
 		err = delError
@@ -1313,6 +1313,45 @@ func NeedTransfer(dst, src fs.Object) bool {
 		}
 	}
 	return true
+}
+
+// RcatSize reads data from the Reader until EOF and uploads it to a file on remote.
+// Pass in size >=0 if known, <0 if not known
+func RcatSize(fdst fs.Fs, dstFileName string, in io.ReadCloser, size int64, modTime time.Time) (dst fs.Object, err error) {
+	var obj fs.Object
+
+	if size >= 0 {
+		// Size known use Put
+		accounting.Stats.Transferring(dstFileName)
+		body := ioutil.NopCloser(in)                                 // we let the server close the body
+		in := accounting.NewAccountSizeName(body, size, dstFileName) // account the transfer (no buffering)
+		var err error
+		defer func() {
+			closeErr := in.Close()
+			if closeErr != nil {
+				accounting.Stats.Error(closeErr)
+				fs.Errorf(dstFileName, "Post request: close failed: %v", closeErr)
+			}
+			accounting.Stats.DoneTransferring(dstFileName, err == nil)
+		}()
+		info := object.NewStaticObjectInfo(dstFileName, modTime, size, true, nil, fdst)
+		obj, err = fdst.Put(in, info)
+		if err != nil {
+			fs.Errorf(dstFileName, "Post request put error: %v", err)
+
+			return nil, err
+		}
+	} else {
+		// Size unknown use Rcat
+		obj, err = Rcat(fdst, dstFileName, in, modTime)
+		if err != nil {
+			fs.Errorf(dstFileName, "Post request rcat error: %v", err)
+
+			return nil, err
+		}
+	}
+
+	return obj, nil
 }
 
 // moveOrCopyFile moves or copies a single file possibly to a new name

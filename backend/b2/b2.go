@@ -66,7 +66,7 @@ func init() {
 		NewFs:       NewFs,
 		Options: []fs.Option{{
 			Name:     "account",
-			Help:     "Account ID",
+			Help:     "Account ID or Application Key ID",
 			Required: true,
 		}, {
 			Name:     "key",
@@ -177,7 +177,7 @@ func (f *Fs) Features() *fs.Features {
 }
 
 // Pattern to match a b2 path
-var matcher = regexp.MustCompile(`^([^/]*)(.*)$`)
+var matcher = regexp.MustCompile(`^/*([^/]*)(.*)$`)
 
 // parseParse parses a b2 'url'
 func parsePath(path string) (bucket, directory string, err error) {
@@ -317,6 +317,11 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	err = f.authorizeAccount()
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to authorize account")
+	}
+	// If this is a key limited to a single bucket, it must exist already
+	if f.bucket != "" && f.info.Allowed.BucketID != "" {
+		f.markBucketOK()
+		f.setBucketID(f.info.Allowed.BucketID)
 	}
 	if f.root != "" {
 		f.root += "/"
@@ -691,7 +696,11 @@ type listBucketFn func(*api.Bucket) error
 
 // listBucketsToFn lists the buckets to the function supplied
 func (f *Fs) listBucketsToFn(fn listBucketFn) error {
-	var account = api.Account{ID: f.info.AccountID}
+	var account = api.ListBucketsRequest{
+		AccountID: f.info.AccountID,
+		BucketID:  f.info.Allowed.BucketID,
+	}
+
 	var response api.ListBucketsResponse
 	opts := rest.Opts{
 		Method: "POST",

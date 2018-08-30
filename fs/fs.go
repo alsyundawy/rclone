@@ -628,16 +628,16 @@ func (ft *Features) Mask(f Fs) *Features {
 // Wrap makes a Copy of the features passed in, overriding the UnWrap/Wrap
 // method only if available in f.
 func (ft *Features) Wrap(f Fs) *Features {
-	copy := new(Features)
-	*copy = *ft
+	ftCopy := new(Features)
+	*ftCopy = *ft
 	if do, ok := f.(UnWrapper); ok {
-		copy.UnWrap = do.UnWrap
+		ftCopy.UnWrap = do.UnWrap
 	}
 	if do, ok := f.(Wrapper); ok {
-		copy.WrapFs = do.WrapFs
-		copy.SetWrapper = do.SetWrapper
+		ftCopy.WrapFs = do.WrapFs
+		ftCopy.SetWrapper = do.SetWrapper
 	}
-	return copy
+	return ftCopy
 }
 
 // WrapsFs adds extra information between `f` which wraps `w`
@@ -827,19 +827,17 @@ type ObjectPair struct {
 	Src, Dst Object
 }
 
-// ObjectPairChan is a channel of ObjectPair
-type ObjectPairChan chan ObjectPair
-
-// Find looks for an Info object for the name passed in
+// Find looks for an RegInfo object for the name passed in.  The name
+// can be either the Name or the Prefix.
 //
 // Services are looked up in the config file
 func Find(name string) (*RegInfo, error) {
 	for _, item := range Registry {
-		if item.Name == name {
+		if item.Name == name || item.Prefix == name {
 			return item, nil
 		}
 	}
-	return nil, errors.Errorf("didn't find filing system for %q", name)
+	return nil, errors.Errorf("didn't find backend called %q", name)
 }
 
 // MustFind looks for an Info object for the type name passed in
@@ -862,10 +860,14 @@ func ParseRemote(path string) (fsInfo *RegInfo, configName, fsPath string, err e
 	var fsName string
 	var ok bool
 	if configName != "" {
-		m := ConfigMap(nil, configName)
-		fsName, ok = m.Get("type")
-		if !ok {
-			return nil, "", "", ErrorNotFoundInConfigFile
+		if strings.HasPrefix(configName, ":") {
+			fsName = configName[1:]
+		} else {
+			m := ConfigMap(nil, configName)
+			fsName, ok = m.Get("type")
+			if !ok {
+				return nil, "", "", ErrorNotFoundInConfigFile
+			}
 		}
 	} else {
 		fsName = "local"
