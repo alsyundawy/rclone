@@ -3,17 +3,21 @@ package vfsflags
 
 import (
 	"github.com/ncw/rclone/fs/config/flags"
+	"github.com/ncw/rclone/fs/rc"
 	"github.com/ncw/rclone/vfs"
 	"github.com/spf13/pflag"
 )
 
 // Options set by command line flags
 var (
-	Opt = vfs.DefaultOpt
+	Opt       = vfs.DefaultOpt
+	DirPerms  = &FileMode{Mode: &Opt.DirPerms}
+	FilePerms = &FileMode{Mode: &Opt.FilePerms}
 )
 
 // AddFlags adds the non filing system specific flags to the command
 func AddFlags(flagSet *pflag.FlagSet) {
+	rc.AddOption("vfs", &Opt)
 	flags.BoolVarP(flagSet, &Opt.NoModTime, "no-modtime", "", Opt.NoModTime, "Don't read/write the modification time (can speed things up).")
 	flags.BoolVarP(flagSet, &Opt.NoChecksum, "no-checksum", "", Opt.NoChecksum, "Don't compare checksums on up/download.")
 	flags.BoolVarP(flagSet, &Opt.NoSeek, "no-seek", "", Opt.NoSeek, "Don't allow seeking in files.")
@@ -25,5 +29,7 @@ func AddFlags(flagSet *pflag.FlagSet) {
 	flags.DurationVarP(flagSet, &Opt.CacheMaxAge, "vfs-cache-max-age", "", Opt.CacheMaxAge, "Max age of objects in the cache.")
 	flags.FVarP(flagSet, &Opt.ChunkSize, "vfs-read-chunk-size", "", "Read the source objects in chunks.")
 	flags.FVarP(flagSet, &Opt.ChunkSizeLimit, "vfs-read-chunk-size-limit", "", "If greater than --vfs-read-chunk-size, double the chunk size after each chunk read, until the limit is reached. 'off' is unlimited.")
+	flags.FVarP(flagSet, DirPerms, "dir-perms", "", "Directory permissions")
+	flags.FVarP(flagSet, FilePerms, "file-perms", "", "File permissions")
 	platformFlags(flagSet)
 }

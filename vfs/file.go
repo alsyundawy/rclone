@@ -9,6 +9,7 @@ import (
 
 	"github.com/ncw/rclone/fs"
 	"github.com/ncw/rclone/fs/log"
+	"github.com/ncw/rclone/fs/operations"
 	"github.com/pkg/errors"
 )
 
@@ -108,20 +109,24 @@ func (f *File) applyPendingRename() {
 // Otherwise it will queue the rename operation on the remote until no writers
 // remain.
 func (f *File) rename(destDir *Dir, newName string) error {
-	// FIXME: could Copy then Delete if Move not available
-	// - though care needed if case insensitive...
-	doMove := f.d.f.Features().Move
-	if doMove == nil {
-		err := errors.Errorf("Fs %q can't rename files (no Move)", f.d.f)
+	if features := f.d.f.Features(); features.Move == nil && features.Copy == nil {
+		err := errors.Errorf("Fs %q can't rename files (no server side Move or Copy)", f.d.f)
 		fs.Errorf(f.Path(), "Dir.Rename error: %v", err)
 		return err
 	}
 
 	renameCall := func() error {
 		newPath := path.Join(destDir.path, newName)
-		newObject, err := doMove(f.o, newPath)
+		dstOverwritten, _ := f.d.f.NewObject(newPath)
+		newObject, err := operations.Move(f.d.f, dstOverwritten, newPath, f.o)
 		if err != nil {
 			fs.Errorf(f.Path(), "File.Rename error: %v", err)
+			return err
+		}
+		// newObject can be nil here for example if --dry-run
+		if newObject == nil {
+			err = errors.New("rename failed: nil object returned")
+			fs.Errorf(f.Path(), "File.Rename %v", err)
 			return err
 		}
 		// Update the node with the new details
@@ -332,9 +337,10 @@ func (f *File) setSize(n int64) {
 // Update the object when written and add it to the directory
 func (f *File) setObject(o fs.Object) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.o = o
 	_ = f.applyPendingModTime()
+	f.mu.Unlock()
+
 	f.d.addObject(f)
 }
 
@@ -441,18 +447,23 @@ func (f *File) Sync() error {
 
 // Remove the file
 func (f *File) Remove() error {
-	f.muRW.Lock()
-	defer f.muRW.Unlock()
 	if f.d.vfs.Opt.ReadOnly {
 		return EROFS
 	}
+	f.muRW.Lock() // muRW must be locked before mu to avoid
+	f.mu.Lock()   // deadlock in RWFileHandle.openPending and .close
 	if f.o != nil {
 		err := f.o.Remove()
 		if err != nil {
 			fs.Errorf(f, "File.Remove file error: %v", err)
+			f.mu.Unlock()
+			f.muRW.Unlock()
 			return err
 		}
 	}
+	f.mu.Unlock()
+	f.muRW.Unlock()
+
 	// Remove the item from the directory listing
 	f.d.delObject(f.Name())
 	// Remove the object from the cache

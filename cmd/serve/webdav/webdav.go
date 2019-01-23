@@ -1,3 +1,5 @@
+//+build go1.9
+
 package webdav
 
 import (
@@ -14,7 +16,6 @@ import (
 	"github.com/ncw/rclone/vfs/vfsflags"
 	"github.com/spf13/cobra"
 	"golang.org/x/net/context" // switch to "context" when we stop supporting go1.8
-
 	"golang.org/x/net/webdav"
 )
 
@@ -69,8 +70,12 @@ Use "rclone hashsum" to see the full list.
 			fs.Debugf(f, "Using hash %v for ETag", hashType)
 		}
 		cmd.Run(false, false, command, func() error {
-			w := newWebDAV(f, &httpflags.Opt)
-			w.serve()
+			s := newWebDAV(f, &httpflags.Opt)
+			err := s.serve()
+			if err != nil {
+				return err
+			}
+			s.Wait()
 			return nil
 		})
 		return nil
@@ -90,9 +95,9 @@ Use "rclone hashsum" to see the full list.
 // might apply". In particular, whether or not renaming a file or directory
 // overwriting another existing file or directory is an error is OS-dependent.
 type WebDAV struct {
+	*httplib.Server
 	f   fs.Fs
 	vfs *vfs.VFS
-	srv *httplib.Server
 }
 
 // check interface
@@ -111,18 +116,20 @@ func newWebDAV(f fs.Fs, opt *httplib.Options) *WebDAV {
 		Logger:     w.logRequest, // FIXME
 	}
 
-	w.srv = httplib.NewServer(handler, opt)
+	w.Server = httplib.NewServer(handler, opt)
 	return w
 }
 
-// serve runs the http server - doesn't return
-func (w *WebDAV) serve() {
-	err := w.srv.Serve()
+// serve runs the http server in the background.
+//
+// Use s.Close() and s.Wait() to shutdown server
+func (w *WebDAV) serve() error {
+	err := w.Serve()
 	if err != nil {
-		fs.Errorf(w.f, "Opening listener: %v", err)
+		return err
 	}
-	fs.Logf(w.f, "WebDav Server started on %s", w.srv.URL())
-	w.srv.Wait()
+	fs.Logf(w.f, "WebDav Server started on %s", w.URL())
+	return nil
 }
 
 // logRequest is called by the webdav module on every request

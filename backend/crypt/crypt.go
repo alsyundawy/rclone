@@ -4,7 +4,6 @@ package crypt
 import (
 	"fmt"
 	"io"
-	"path"
 	"strings"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/ncw/rclone/fs/config/configmap"
 	"github.com/ncw/rclone/fs/config/configstruct"
 	"github.com/ncw/rclone/fs/config/obscure"
+	"github.com/ncw/rclone/fs/fspath"
 	"github.com/ncw/rclone/fs/hash"
 	"github.com/pkg/errors"
 )
@@ -67,8 +67,16 @@ func init() {
 			Help:       "Password or pass phrase for salt. Optional but recommended.\nShould be different to the previous password.",
 			IsPassword: true,
 		}, {
-			Name:     "show_mapping",
-			Help:     "For all files listed show how the names encrypt.",
+			Name: "show_mapping",
+			Help: `For all files listed show how the names encrypt.
+
+If this flag is set then for each file that the remote is asked to
+list, it will log (at level INFO) a line stating the decrypted file
+name and the encrypted file name.
+
+This is so you can work out which encrypted names are which decrypted
+names just in case you need to do something with the encrypted file
+names, or for debugging purposes.`,
 			Default:  false,
 			Hide:     fs.OptionHideConfigurator,
 			Advanced: true,
@@ -130,16 +138,20 @@ func NewFs(name, rpath string, m configmap.Mapper) (fs.Fs, error) {
 	if strings.HasPrefix(remote, name+":") {
 		return nil, errors.New("can't point crypt remote at itself - check the value of the remote setting")
 	}
+	wInfo, wName, wPath, wConfig, err := fs.ConfigFs(remote)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to parse remote %q to wrap", remote)
+	}
 	// Look for a file first
-	remotePath := path.Join(remote, cipher.EncryptFileName(rpath))
-	wrappedFs, err := fs.NewFs(remotePath)
+	remotePath := fspath.JoinRootPath(wPath, cipher.EncryptFileName(rpath))
+	wrappedFs, err := wInfo.NewFs(wName, remotePath, wConfig)
 	// if that didn't produce a file, look for a directory
 	if err != fs.ErrorIsFile {
-		remotePath = path.Join(remote, cipher.EncryptDirName(rpath))
-		wrappedFs, err = fs.NewFs(remotePath)
+		remotePath = fspath.JoinRootPath(wPath, cipher.EncryptDirName(rpath))
+		wrappedFs, err = wInfo.NewFs(wName, remotePath, wConfig)
 	}
 	if err != fs.ErrorIsFile && err != nil {
-		return nil, errors.Wrapf(err, "failed to make remote %q to wrap", remotePath)
+		return nil, errors.Wrapf(err, "failed to make remote %s:%q to wrap", wName, remotePath)
 	}
 	f := &Fs{
 		Fs:     wrappedFs,
@@ -161,7 +173,7 @@ func NewFs(name, rpath string, m configmap.Mapper) (fs.Fs, error) {
 
 	doChangeNotify := wrappedFs.Features().ChangeNotify
 	if doChangeNotify != nil {
-		f.features.ChangeNotify = func(notifyFunc func(string, fs.EntryType), pollInterval time.Duration) chan bool {
+		f.features.ChangeNotify = func(notifyFunc func(string, fs.EntryType), pollInterval <-chan time.Duration) {
 			wrappedNotifyFunc := func(path string, entryType fs.EntryType) {
 				decrypted, err := f.DecryptFileName(path)
 				if err != nil {
@@ -170,7 +182,7 @@ func NewFs(name, rpath string, m configmap.Mapper) (fs.Fs, error) {
 				}
 				notifyFunc(decrypted, entryType)
 			}
-			return doChangeNotify(wrappedNotifyFunc, pollInterval)
+			doChangeNotify(wrappedNotifyFunc, pollInterval)
 		}
 	}
 

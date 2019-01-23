@@ -1,8 +1,11 @@
 package config
 
 import (
+	"errors"
+
 	"github.com/ncw/rclone/cmd"
 	"github.com/ncw/rclone/fs/config"
+	"github.com/ncw/rclone/fs/rc"
 	"github.com/spf13/cobra"
 )
 
@@ -90,10 +93,28 @@ For example to make a swift remote of name myremote using auto config
 you would do:
 
     rclone config create myremote swift env_auth true
+
+Note that if the config process would normally ask a question the
+default is taken.  Each time that happens rclone will print a message
+saying how to affect the value taken.
+
+So for example if you wanted to configure a Google Drive remote but
+using remote authorization you would do this:
+
+    rclone config create mydrive drive config_is_local false
 `,
 	RunE: func(command *cobra.Command, args []string) error {
 		cmd.CheckArgs(2, 256, command, args)
-		return config.CreateRemote(args[0], args[1], args[2:])
+		in, err := argsToMap(args[2:])
+		if err != nil {
+			return err
+		}
+		err = config.CreateRemote(args[0], args[1], in)
+		if err != nil {
+			return err
+		}
+		config.ShowRemote(args[0])
+		return nil
 	},
 }
 
@@ -107,10 +128,24 @@ in pairs of <key> <value>.
 For example to update the env_auth field of a remote of name myremote you would do:
 
     rclone config update myremote swift env_auth true
+
+If the remote uses oauth the token will be updated, if you don't
+require this add an extra parameter thus:
+
+    rclone config update myremote swift env_auth true config_refresh_token false
 `,
 	RunE: func(command *cobra.Command, args []string) error {
 		cmd.CheckArgs(3, 256, command, args)
-		return config.UpdateRemote(args[0], args[1:])
+		in, err := argsToMap(args[1:])
+		if err != nil {
+			return err
+		}
+		err = config.UpdateRemote(args[0], in)
+		if err != nil {
+			return err
+		}
+		config.ShowRemote(args[0])
+		return nil
 	},
 }
 
@@ -136,6 +171,29 @@ For example to set password of a remote of name myremote you would do:
 `,
 	RunE: func(command *cobra.Command, args []string) error {
 		cmd.CheckArgs(3, 256, command, args)
-		return config.PasswordRemote(args[0], args[1:])
+		in, err := argsToMap(args[1:])
+		if err != nil {
+			return err
+		}
+		err = config.PasswordRemote(args[0], in)
+		if err != nil {
+			return err
+		}
+		config.ShowRemote(args[0])
+		return nil
 	},
+}
+
+// This takes a list of arguments in key value key value form and
+// converts it into a map
+func argsToMap(args []string) (out rc.Params, err error) {
+	if len(args)%2 != 0 {
+		return nil, errors.New("found key without value")
+	}
+	out = rc.Params{}
+	// Set the config
+	for i := 0; i < len(args); i += 2 {
+		out[args[i]] = args[i+1]
+	}
+	return out, nil
 }

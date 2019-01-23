@@ -31,9 +31,11 @@ import (
 	"time"
 
 	"github.com/dropbox/dropbox-sdk-go-unofficial/dropbox"
+	"github.com/dropbox/dropbox-sdk-go-unofficial/dropbox/auth"
 	"github.com/dropbox/dropbox-sdk-go-unofficial/dropbox/common"
 	"github.com/dropbox/dropbox-sdk-go-unofficial/dropbox/files"
 	"github.com/dropbox/dropbox-sdk-go-unofficial/dropbox/sharing"
+	"github.com/dropbox/dropbox-sdk-go-unofficial/dropbox/team"
 	"github.com/dropbox/dropbox-sdk-go-unofficial/dropbox/users"
 	"github.com/ncw/rclone/fs"
 	"github.com/ncw/rclone/fs/config"
@@ -79,8 +81,8 @@ const (
 	// Choose 48MB which is 91% of Maximum speed.  rclone by
 	// default does 4 transfers so this should use 4*48MB = 192MB
 	// by default.
-	defaultChunkSize = 48 * 1024 * 1024
-	maxChunkSize     = 150 * 1024 * 1024
+	defaultChunkSize = 48 * fs.MebiByte
+	maxChunkSize     = 150 * fs.MebiByte
 )
 
 var (
@@ -120,9 +122,21 @@ func init() {
 			Name: config.ConfigClientSecret,
 			Help: "Dropbox App Client Secret\nLeave blank normally.",
 		}, {
-			Name:     "chunk_size",
-			Help:     fmt.Sprintf("Upload chunk size. Max %v.", fs.SizeSuffix(maxChunkSize)),
+			Name: "chunk_size",
+			Help: fmt.Sprintf(`Upload chunk size. (< %v).
+
+Any files larger than this will be uploaded in chunks of this size.
+
+Note that chunks are buffered in memory (one at a time) so rclone can
+deal with retries.  Setting this larger will increase the speed
+slightly (at most 10%% for 128MB in tests) at the cost of using more
+memory.  It can be set smaller if you are tight on memory.`, fs.SizeSuffix(maxChunkSize)),
 			Default:  fs.SizeSuffix(defaultChunkSize),
+			Advanced: true,
+		}, {
+			Name:     "impersonate",
+			Help:     "Impersonate this user when using a business account.",
+			Default:  "",
 			Advanced: true,
 		}},
 	})
@@ -130,7 +144,8 @@ func init() {
 
 // Options defines the configuration for this backend
 type Options struct {
-	ChunkSize fs.SizeSuffix `config:"chunk_size"`
+	ChunkSize   fs.SizeSuffix `config:"chunk_size"`
+	Impersonate string        `config:"impersonate"`
 }
 
 // Fs represents a remote dropbox server
@@ -142,6 +157,7 @@ type Fs struct {
 	srv            files.Client   // the connection to the dropbox server
 	sharing        sharing.Client // as above, but for generating sharing links
 	users          users.Client   // as above, but for accessing user information
+	team           team.Client    // for the Teams API
 	slashRoot      string         // root with "/" prefix, lowercase
 	slashRootSlash string         // root with "/" prefix and postfix, lowercase
 	pacer          *pacer.Pacer   // To pace the API calls
@@ -188,11 +204,39 @@ func shouldRetry(err error) (bool, error) {
 		return false, err
 	}
 	baseErrString := errors.Cause(err).Error()
-	// FIXME there is probably a better way of doing this!
+	// handle any official Retry-After header from Dropbox's SDK first
+	switch e := err.(type) {
+	case auth.RateLimitAPIError:
+		if e.RateLimitError.RetryAfter > 0 {
+			fs.Debugf(baseErrString, "Too many requests or write operations. Trying again in %d seconds.", e.RateLimitError.RetryAfter)
+			time.Sleep(time.Duration(e.RateLimitError.RetryAfter) * time.Second)
+		}
+		return true, err
+	}
+	// Keep old behaviour for backward compatibility
 	if strings.Contains(baseErrString, "too_many_write_operations") || strings.Contains(baseErrString, "too_many_requests") {
 		return true, err
 	}
 	return fserrors.ShouldRetry(err), err
+}
+
+func checkUploadChunkSize(cs fs.SizeSuffix) error {
+	const minChunkSize = fs.Byte
+	if cs < minChunkSize {
+		return errors.Errorf("%s is less than %s", cs, minChunkSize)
+	}
+	if cs > maxChunkSize {
+		return errors.Errorf("%s is greater than %s", cs, maxChunkSize)
+	}
+	return nil
+}
+
+func (f *Fs) setUploadChunkSize(cs fs.SizeSuffix) (old fs.SizeSuffix, err error) {
+	err = checkUploadChunkSize(cs)
+	if err == nil {
+		old, f.opt.ChunkSize = f.opt.ChunkSize, cs
+	}
+	return
 }
 
 // NewFs contstructs an Fs from the path, container:path
@@ -203,8 +247,9 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	if err != nil {
 		return nil, err
 	}
-	if opt.ChunkSize > maxChunkSize {
-		return nil, errors.Errorf("chunk size too big, must be < %v", maxChunkSize)
+	err = checkUploadChunkSize(opt.ChunkSize)
+	if err != nil {
+		return nil, errors.Wrap(err, "dropbox: chunk size")
 	}
 
 	// Convert the old token if it exists.  The old token was just
@@ -235,6 +280,29 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		Client:          oAuthClient,    // maybe???
 		HeaderGenerator: f.headerGenerator,
 	}
+
+	// NOTE: needs to be created pre-impersonation so we can look up the impersonated user
+	f.team = team.New(config)
+
+	if opt.Impersonate != "" {
+
+		user := team.UserSelectorArg{
+			Email: opt.Impersonate,
+		}
+		user.Tag = "email"
+
+		members := []*team.UserSelectorArg{&user}
+		args := team.NewMembersGetInfoArgs(members)
+
+		memberIds, err := f.team.MembersGetInfo(args)
+
+		if err != nil {
+			return nil, errors.Wrapf(err, "invalid dropbox team member: %q", opt.Impersonate)
+		}
+
+		config.AsMemberID = memberIds[0].MemberInfo.Profile.MemberProfile.TeamMemberId
+	}
+
 	f.srv = files.New(config)
 	f.sharing = sharing.New(config)
 	f.users = users.New(config)

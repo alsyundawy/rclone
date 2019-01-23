@@ -42,6 +42,7 @@ See the following for detailed instructions for
   * [Pcloud](/pcloud/)
   * [QingStor](/qingstor/)
   * [SFTP](/sftp/)
+  * [Union](/union/)
   * [WebDAV](/webdav/)
   * [Yandex Disk](/yandex/)
   * [The local filesystem](/local/)
@@ -266,6 +267,15 @@ Options
 
 Rclone has a number of options to control its behaviour.
 
+Options that take parameters can have the values passed in two ways,
+`--option=value` or `--option value`. However boolean (true/false)
+options behave slightly differently to the other options in that
+`--boolean` sets the option to `true` and the absence of the flag sets
+it to `false`.  It is also possible to specify `--boolean=false` or
+`--boolean=true`.  Note that `--boolean false` is not valid - this is
+parsed as `--boolean` and the `false` is parsed as an extra command
+line argument for rclone.
+
 Options which use TIME use the go time parser.  A duration string is a
 possibly signed sequence of decimal numbers, each with optional
 fraction and a unit suffix, such as "300ms", "-1.5h" or "2h45m". Valid
@@ -427,8 +437,8 @@ Normally the config file is in your home directory as a file called
 older version). If `$XDG_CONFIG_HOME` is set it will be at
 `$XDG_CONFIG_HOME/rclone/rclone.conf`
 
-If you run `rclone -h` and look at the help for the `--config` option
-you will see where the default location is for you.
+If you run `rclone config file` you will see where the default
+location is for you.
 
 Use this flag to override the config location, eg `rclone
 --config=".myconfig" .config`.
@@ -549,6 +559,10 @@ Note that if you are using the `logrotate` program to manage rclone's
 logs, then you should use the `copytruncate` option as rclone doesn't
 have a signal to rotate logs.
 
+### --log-format LIST ###
+
+Comma separated list of log format options. `date`, `time`, `microseconds`, `longfile`, `shortfile`, `UTC`.  The default is "`date`,`time`". 
+
 ### --log-level LEVEL ###
 
 This sets the log level for rclone.  The default log level is `NOTICE`.
@@ -661,7 +675,7 @@ files if they are incorrect as it would normally.
 This can be used if the remote is being synced with another tool also
 (eg the Google Drive client).
 
-### --P, --progress ###
+### -P, --progress ###
 
 This flag makes rclone update the stats in a static block in the
 terminal providing a realtime overview of the transfer.
@@ -675,6 +689,10 @@ with the `--stats` flag.
 
 This can be used with the `--stats-one-line` flag for a simpler
 display.
+
+Note: On Windows until[this bug](https://github.com/Azure/go-ansiterm/issues/26)
+is fixed all non-ASCII characters will be replaced with `.` when
+`--progress` is in use.
 
 ### -q, --quiet ###
 
@@ -830,10 +848,11 @@ will be considered.
 
 If the destination does not support server-side copy or move, rclone
 will fall back to the default behaviour and log an error level message
-to the console.
+to the console. Note: Encrypted destinations are not supported
+by `--track-renames`.
 
-Note that `--track-renames` uses extra memory to keep track of all
-the rename candidates.
+Note that `--track-renames` is incompatible with `--no-traverse` and
+that it uses extra memory to keep track of all the rename candidates.
 
 Note also that `--track-renames` is incompatible with
 `--delete-before` and will select `--delete-after` instead of
@@ -1121,6 +1140,24 @@ In this mode, TLS is susceptible to man-in-the-middle attacks.
 This option defaults to `false`.
 
 **This should be used only for testing.**
+
+### --no-traverse ###
+
+The `--no-traverse` flag controls whether the destination file system
+is traversed when using the `copy` or `move` commands.
+`--no-traverse` is not compatible with `sync` and will be ignored if
+you supply it with `sync`.
+
+If you are only copying a small number of files (or are filtering most
+of the files) and/or have a large number of files on the destination
+then `--no-traverse` will stop rclone listing the destination and save
+time.
+
+However, if you are copying a large number of files, especially if you
+are doing a copy where lots of the files under consideration haven't
+changed and won't need copying then you shouldn't use `--no-traverse`.
+
+See [rclone copy](/commands/rclone_copy/) for an example of how to use it.
 
 Filtering
 ---------

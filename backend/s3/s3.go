@@ -39,9 +39,11 @@ import (
 	"github.com/ncw/rclone/fs"
 	"github.com/ncw/rclone/fs/config/configmap"
 	"github.com/ncw/rclone/fs/config/configstruct"
+	"github.com/ncw/rclone/fs/fserrors"
 	"github.com/ncw/rclone/fs/fshttp"
 	"github.com/ncw/rclone/fs/hash"
 	"github.com/ncw/rclone/fs/walk"
+	"github.com/ncw/rclone/lib/pacer"
 	"github.com/ncw/rclone/lib/rest"
 	"github.com/ncw/swift"
 	"github.com/pkg/errors"
@@ -51,7 +53,7 @@ import (
 func init() {
 	fs.Register(&fs.RegInfo{
 		Name:        "s3",
-		Description: "Amazon S3 Compliant Storage Providers (AWS, Ceph, Dreamhost, IBM COS, Minio)",
+		Description: "Amazon S3 Compliant Storage Provider (AWS, Alibaba, Ceph, Digital Ocean, Dreamhost, IBM COS, Minio, etc)",
 		NewFs:       NewFs,
 		Options: []fs.Option{{
 			Name: fs.ConfigProvider,
@@ -59,6 +61,9 @@ func init() {
 			Examples: []fs.OptionExample{{
 				Value: "AWS",
 				Help:  "Amazon Web Services (AWS) S3",
+			}, {
+				Value: "Alibaba",
+				Help:  "Alibaba Cloud Object Storage System (OSS) formerly Aliyun",
 			}, {
 				Value: "Ceph",
 				Help:  "Ceph Object Storage",
@@ -74,6 +79,9 @@ func init() {
 			}, {
 				Value: "Minio",
 				Help:  "Minio Object Storage",
+			}, {
+				Value: "Netease",
+				Help:  "Netease Object Storage (NOS)",
 			}, {
 				Value: "Wasabi",
 				Help:  "Wasabi Object Storage",
@@ -148,7 +156,7 @@ func init() {
 		}, {
 			Name:     "region",
 			Help:     "Region to connect to.\nLeave blank if you are using an S3 clone and you don't have a region.",
-			Provider: "!AWS",
+			Provider: "!AWS,Alibaba",
 			Examples: []fs.OptionExample{{
 				Value: "",
 				Help:  "Use this if unsure. Will use v4 signatures and an empty region.",
@@ -268,9 +276,72 @@ func init() {
 				Help:  "Toronto Single Site Private Endpoint",
 			}},
 		}, {
+			// oss endpoints: https://help.aliyun.com/document_detail/31837.html
+			Name:     "endpoint",
+			Help:     "Endpoint for OSS API.",
+			Provider: "Alibaba",
+			Examples: []fs.OptionExample{{
+				Value: "oss-cn-hangzhou.aliyuncs.com",
+				Help:  "East China 1 (Hangzhou)",
+			}, {
+				Value: "oss-cn-shanghai.aliyuncs.com",
+				Help:  "East China 2 (Shanghai)",
+			}, {
+				Value: "oss-cn-qingdao.aliyuncs.com",
+				Help:  "North China 1 (Qingdao)",
+			}, {
+				Value: "oss-cn-beijing.aliyuncs.com",
+				Help:  "North China 2 (Beijing)",
+			}, {
+				Value: "oss-cn-zhangjiakou.aliyuncs.com",
+				Help:  "North China 3 (Zhangjiakou)",
+			}, {
+				Value: "oss-cn-huhehaote.aliyuncs.com",
+				Help:  "North China 5 (Huhehaote)",
+			}, {
+				Value: "oss-cn-shenzhen.aliyuncs.com",
+				Help:  "South China 1 (Shenzhen)",
+			}, {
+				Value: "oss-cn-hongkong.aliyuncs.com",
+				Help:  "Hong Kong (Hong Kong)",
+			}, {
+				Value: "oss-us-west-1.aliyuncs.com",
+				Help:  "US West 1 (Silicon Valley)",
+			}, {
+				Value: "oss-us-east-1.aliyuncs.com",
+				Help:  "US East 1 (Virginia)",
+			}, {
+				Value: "oss-ap-southeast-1.aliyuncs.com",
+				Help:  "Southeast Asia Southeast 1 (Singapore)",
+			}, {
+				Value: "oss-ap-southeast-2.aliyuncs.com",
+				Help:  "Asia Pacific Southeast 2 (Sydney)",
+			}, {
+				Value: "oss-ap-southeast-3.aliyuncs.com",
+				Help:  "Southeast Asia Southeast 3 (Kuala Lumpur)",
+			}, {
+				Value: "oss-ap-southeast-5.aliyuncs.com",
+				Help:  "Asia Pacific Southeast 5 (Jakarta)",
+			}, {
+				Value: "oss-ap-northeast-1.aliyuncs.com",
+				Help:  "Asia Pacific Northeast 1 (Japan)",
+			}, {
+				Value: "oss-ap-south-1.aliyuncs.com",
+				Help:  "Asia Pacific South 1 (Mumbai)",
+			}, {
+				Value: "oss-eu-central-1.aliyuncs.com",
+				Help:  "Central Europe 1 (Frankfurt)",
+			}, {
+				Value: "oss-eu-west-1.aliyuncs.com",
+				Help:  "West Europe (London)",
+			}, {
+				Value: "oss-me-east-1.aliyuncs.com",
+				Help:  "Middle East 1 (Dubai)",
+			}},
+		}, {
 			Name:     "endpoint",
 			Help:     "Endpoint for S3 API.\nRequired when using an S3 clone.",
-			Provider: "!AWS,IBMCOS",
+			Provider: "!AWS,IBMCOS,Alibaba",
 			Examples: []fs.OptionExample{{
 				Value:    "objects-us-west-1.dream.io",
 				Help:     "Dream Objects endpoint",
@@ -289,7 +360,11 @@ func init() {
 				Provider: "DigitalOcean",
 			}, {
 				Value:    "s3.wasabisys.com",
-				Help:     "Wasabi Object Storage",
+				Help:     "Wasabi US East endpoint",
+				Provider: "Wasabi",
+			}, {
+				Value:    "s3.us-west-1.wasabisys.com",
+				Help:     "Wasabi US West endpoint",
 				Provider: "Wasabi",
 			}},
 		}, {
@@ -443,10 +518,17 @@ func init() {
 		}, {
 			Name:     "location_constraint",
 			Help:     "Location constraint - must be set to match the Region.\nLeave blank if not sure. Used when creating buckets only.",
-			Provider: "!AWS,IBMCOS",
+			Provider: "!AWS,IBMCOS,Alibaba",
 		}, {
 			Name: "acl",
-			Help: "Canned ACL used when creating buckets and/or storing objects in S3.\nFor more info visit https://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html#canned-acl",
+			Help: `Canned ACL used when creating buckets and storing or copying objects.
+
+This ACL is used for creating objects and if bucket_acl isn't set, for creating buckets too.
+
+For more info visit https://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html#canned-acl
+
+Note that this ACL is applied when server side copying objects as S3
+doesn't copy the ACL from the source but rather writes a fresh one.`,
 			Examples: []fs.OptionExample{{
 				Value:    "private",
 				Help:     "Owner gets FULL_CONTROL. No one else has access rights (default).",
@@ -489,6 +571,28 @@ func init() {
 				Provider: "IBMCOS",
 			}},
 		}, {
+			Name: "bucket_acl",
+			Help: `Canned ACL used when creating buckets.
+
+For more info visit https://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html#canned-acl
+
+Note that this ACL is applied when only when creating buckets.  If it
+isn't set then "acl" is used instead.`,
+			Advanced: true,
+			Examples: []fs.OptionExample{{
+				Value: "private",
+				Help:  "Owner gets FULL_CONTROL. No one else has access rights (default).",
+			}, {
+				Value: "public-read",
+				Help:  "Owner gets FULL_CONTROL. The AllUsers group gets READ access.",
+			}, {
+				Value: "public-read-write",
+				Help:  "Owner gets FULL_CONTROL. The AllUsers group gets READ and WRITE access.\nGranting this on a bucket is generally not recommended.",
+			}, {
+				Value: "authenticated-read",
+				Help:  "Owner gets FULL_CONTROL. The AuthenticatedUsers group gets READ access.",
+			}},
+		}, {
 			Name:     "server_side_encryption",
 			Help:     "The server-side encryption algorithm used when storing this object in S3.",
 			Provider: "AWS",
@@ -515,7 +619,7 @@ func init() {
 			}},
 		}, {
 			Name:     "storage_class",
-			Help:     "The storage class to use when storing objects in S3.",
+			Help:     "The storage class to use when storing new objects in S3.",
 			Provider: "AWS",
 			Examples: []fs.OptionExample{{
 				Value: "",
@@ -532,11 +636,49 @@ func init() {
 			}, {
 				Value: "ONEZONE_IA",
 				Help:  "One Zone Infrequent Access storage class",
+			}, {
+				Value: "GLACIER",
+				Help:  "Glacier storage class",
 			}},
 		}, {
-			Name:     "chunk_size",
-			Help:     "Chunk size to use for uploading",
-			Default:  fs.SizeSuffix(s3manager.MinUploadPartSize),
+			// Mapping from here: https://www.alibabacloud.com/help/doc-detail/64919.htm
+			Name:     "storage_class",
+			Help:     "The storage class to use when storing new objects in OSS.",
+			Provider: "Alibaba",
+			Examples: []fs.OptionExample{{
+				Value: "",
+				Help:  "Default",
+			}, {
+				Value: "STANDARD",
+				Help:  "Standard storage class",
+			}, {
+				Value: "GLACIER",
+				Help:  "Archive storage mode.",
+			}, {
+				Value: "STANDARD_IA",
+				Help:  "Infrequent access storage mode.",
+			}},
+		}, {
+			Name: "upload_cutoff",
+			Help: `Cutoff for switching to chunked upload
+
+Any files larger than this will be uploaded in chunks of chunk_size.
+The minimum is 0 and the maximum is 5GB.`,
+			Default:  defaultUploadCutoff,
+			Advanced: true,
+		}, {
+			Name: "chunk_size",
+			Help: `Chunk size to use for uploading.
+
+When uploading files larger than upload_cutoff they will be uploaded
+as multipart uploads using this chunk size.
+
+Note that "--s3-upload-concurrency" chunks of this size are buffered
+in memory per transfer.
+
+If you are transferring large files over high speed links and you have
+enough memory, then increasing this will speed up the transfers.`,
+			Default:  minChunkSize,
 			Advanced: true,
 		}, {
 			Name:     "disable_checksum",
@@ -546,17 +688,40 @@ func init() {
 		}, {
 			Name:     "session_token",
 			Help:     "An AWS session token",
-			Hide:     fs.OptionHideBoth,
 			Advanced: true,
 		}, {
-			Name:     "upload_concurrency",
-			Help:     "Concurrency for multipart uploads.",
-			Default:  2,
+			Name: "upload_concurrency",
+			Help: `Concurrency for multipart uploads.
+
+This is the number of chunks of the same file that are uploaded
+concurrently.
+
+If you are uploading small numbers of large file over high speed link
+and these uploads do not fully utilize your bandwidth, then increasing
+this may help to speed up the transfers.`,
+			Default:  4,
 			Advanced: true,
 		}, {
-			Name:     "force_path_style",
-			Help:     "If true use path style access if false use virtual hosted style.\nSome providers (eg Aliyun OSS or Netease COS) require this.",
+			Name: "force_path_style",
+			Help: `If true use path style access if false use virtual hosted style.
+
+If this is true (the default) then rclone will use path style access,
+if false then rclone will use virtual path style. See [the AWS S3
+docs](https://docs.aws.amazon.com/AmazonS3/latest/dev/UsingBucket.html#access-bucket-intro)
+for more info.
+
+Some providers (eg Aliyun OSS or Netease COS) require this set to false.`,
 			Default:  true,
+			Advanced: true,
+		}, {
+			Name: "v2_auth",
+			Help: `If true use v2 authentication.
+
+If this is false (the default) then rclone will use v4 authentication.
+If it is set then rclone will use v2 authentication.
+
+Use this only if v4 signatures don't work, eg pre Jewel/v10 CEPH.`,
+			Default:  false,
 			Advanced: true,
 		}},
 	})
@@ -564,12 +729,16 @@ func init() {
 
 // Constants
 const (
-	metaMtime      = "Mtime"                       // the meta key to store mtime in - eg X-Amz-Meta-Mtime
-	metaMD5Hash    = "Md5chksum"                   // the meta key to store md5hash in
-	listChunkSize  = 1000                          // number of items to read at once
-	maxRetries     = 10                            // number of retries to make of operations
-	maxSizeForCopy = 5 * 1024 * 1024 * 1024        // The maximum size of object we can COPY
-	maxFileSize    = 5 * 1024 * 1024 * 1024 * 1024 // largest possible upload file size
+	metaMtime           = "Mtime"                       // the meta key to store mtime in - eg X-Amz-Meta-Mtime
+	metaMD5Hash         = "Md5chksum"                   // the meta key to store md5hash in
+	listChunkSize       = 1000                          // number of items to read at once
+	maxRetries          = 10                            // number of retries to make of operations
+	maxSizeForCopy      = 5 * 1024 * 1024 * 1024        // The maximum size of object we can COPY
+	maxFileSize         = 5 * 1024 * 1024 * 1024 * 1024 // largest possible upload file size
+	minChunkSize        = fs.SizeSuffix(s3manager.MinUploadPartSize)
+	defaultUploadCutoff = fs.SizeSuffix(200 * 1024 * 1024)
+	maxUploadCutoff     = fs.SizeSuffix(5 * 1024 * 1024 * 1024)
+	minSleep            = 10 * time.Millisecond // In case of error, start at 10ms sleep.
 )
 
 // Options defines the configuration for this backend
@@ -582,14 +751,17 @@ type Options struct {
 	Endpoint             string        `config:"endpoint"`
 	LocationConstraint   string        `config:"location_constraint"`
 	ACL                  string        `config:"acl"`
+	BucketACL            string        `config:"bucket_acl"`
 	ServerSideEncryption string        `config:"server_side_encryption"`
 	SSEKMSKeyID          string        `config:"sse_kms_key_id"`
 	StorageClass         string        `config:"storage_class"`
+	UploadCutoff         fs.SizeSuffix `config:"upload_cutoff"`
 	ChunkSize            fs.SizeSuffix `config:"chunk_size"`
 	DisableChecksum      bool          `config:"disable_checksum"`
 	SessionToken         string        `config:"session_token"`
 	UploadConcurrency    int           `config:"upload_concurrency"`
 	ForcePathStyle       bool          `config:"force_path_style"`
+	V2Auth               bool          `config:"v2_auth"`
 }
 
 // Fs represents a remote s3 server
@@ -604,6 +776,8 @@ type Fs struct {
 	bucketOKMu    sync.Mutex       // mutex to protect bucket OK
 	bucketOK      bool             // true if we have created the bucket
 	bucketDeleted bool             // true if we have deleted the bucket
+	pacer         *pacer.Pacer     // To pace the API calls
+	srv           *http.Client     // a plain http client
 }
 
 // Object describes a s3 object
@@ -647,6 +821,36 @@ func (f *Fs) String() string {
 // Features returns the optional features of this Fs
 func (f *Fs) Features() *fs.Features {
 	return f.features
+}
+
+// retryErrorCodes is a slice of error codes that we will retry
+// See: https://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html
+var retryErrorCodes = []int{
+	// 409, // Conflict - various states that could be resolved on a retry
+	503, // Service Unavailable/Slow Down - "Reduce your request rate"
+}
+
+//S3 is pretty resilient, and the built in retry handling is probably sufficient
+// as it should notice closed connections and timeouts which are the most likely
+// sort of failure modes
+func shouldRetry(err error) (bool, error) {
+	// If this is an awserr object, try and extract more useful information to determine if we should retry
+	if awsError, ok := err.(awserr.Error); ok {
+		// Simple case, check the original embedded error in case it's generically retriable
+		if fserrors.ShouldRetry(awsError.OrigErr()) {
+			return true, err
+		}
+		// Failing that, if it's a RequestFailure it's probably got an http status code we can check
+		if reqErr, ok := err.(awserr.RequestFailure); ok {
+			for _, e := range retryErrorCodes {
+				if reqErr.StatusCode() == e {
+					return true, err
+				}
+			}
+		}
+	}
+	// Ok, not an awserr, check for generic failure conditions
+	return fserrors.ShouldRetry(err), err
 }
 
 // Pattern to match a s3 path
@@ -722,6 +926,9 @@ func s3Connection(opt *Options) (*s3.S3, *session.Session, error) {
 	if opt.Region == "" {
 		opt.Region = "us-east-1"
 	}
+	if opt.Provider == "Alibaba" || opt.Provider == "Netease" {
+		opt.ForcePathStyle = false
+	}
 	awsConfig := aws.NewConfig().
 		WithRegion(opt.Region).
 		WithMaxRetries(maxRetries).
@@ -730,9 +937,22 @@ func s3Connection(opt *Options) (*s3.S3, *session.Session, error) {
 		WithHTTPClient(fshttp.NewClient(fs.Config)).
 		WithS3ForcePathStyle(opt.ForcePathStyle)
 	// awsConfig.WithLogLevel(aws.LogDebugWithSigning)
-	ses := session.New()
-	c := s3.New(ses, awsConfig)
-	if opt.Region == "other-v2-signature" {
+	awsSessionOpts := session.Options{
+		Config: *awsConfig,
+	}
+	if opt.EnvAuth && opt.AccessKeyID == "" && opt.SecretAccessKey == "" {
+		// Enable loading config options from ~/.aws/config (selected by AWS_PROFILE env)
+		awsSessionOpts.SharedConfigState = session.SharedConfigEnable
+		// The session constructor (aws/session/mergeConfigSrcs) will only use the user's preferred credential source
+		// (from the shared config file) if the passed-in Options.Config.Credentials is nil.
+		awsSessionOpts.Config.Credentials = nil
+	}
+	ses, err := session.NewSessionWithOptions(awsSessionOpts)
+	if err != nil {
+		return nil, nil, err
+	}
+	c := s3.New(ses)
+	if opt.V2Auth || opt.Region == "other-v2-signature" {
 		fs.Debugf(nil, "Using v2 auth")
 		signer := func(req *request.Request) {
 			// Ignore AnonymousCredentials object
@@ -748,6 +968,36 @@ func s3Connection(opt *Options) (*s3.S3, *session.Session, error) {
 	return c, ses, nil
 }
 
+func checkUploadChunkSize(cs fs.SizeSuffix) error {
+	if cs < minChunkSize {
+		return errors.Errorf("%s is less than %s", cs, minChunkSize)
+	}
+	return nil
+}
+
+func (f *Fs) setUploadChunkSize(cs fs.SizeSuffix) (old fs.SizeSuffix, err error) {
+	err = checkUploadChunkSize(cs)
+	if err == nil {
+		old, f.opt.ChunkSize = f.opt.ChunkSize, cs
+	}
+	return
+}
+
+func checkUploadCutoff(cs fs.SizeSuffix) error {
+	if cs > maxUploadCutoff {
+		return errors.Errorf("%s is greater than %s", cs, maxUploadCutoff)
+	}
+	return nil
+}
+
+func (f *Fs) setUploadCutoff(cs fs.SizeSuffix) (old fs.SizeSuffix, err error) {
+	err = checkUploadCutoff(cs)
+	if err == nil {
+		old, f.opt.UploadCutoff = f.opt.UploadCutoff, cs
+	}
+	return
+}
+
 // NewFs constructs an Fs from the path, bucket:path
 func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	// Parse config into Options struct
@@ -756,12 +1006,23 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	if err != nil {
 		return nil, err
 	}
-	if opt.ChunkSize < fs.SizeSuffix(s3manager.MinUploadPartSize) {
-		return nil, errors.Errorf("s3 chunk size (%v) must be >= %v", opt.ChunkSize, fs.SizeSuffix(s3manager.MinUploadPartSize))
+	err = checkUploadChunkSize(opt.ChunkSize)
+	if err != nil {
+		return nil, errors.Wrap(err, "s3: chunk size")
+	}
+	err = checkUploadCutoff(opt.UploadCutoff)
+	if err != nil {
+		return nil, errors.Wrap(err, "s3: upload cutoff")
 	}
 	bucket, directory, err := s3ParsePath(root)
 	if err != nil {
 		return nil, err
+	}
+	if opt.ACL == "" {
+		opt.ACL = "private"
+	}
+	if opt.BucketACL == "" {
+		opt.BucketACL = opt.ACL
 	}
 	c, ses, err := s3Connection(opt)
 	if err != nil {
@@ -774,6 +1035,8 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		c:      c,
 		bucket: bucket,
 		ses:    ses,
+		pacer:  pacer.New().SetMinSleep(minSleep).SetPacer(pacer.S3Pacer),
+		srv:    fshttp.NewClient(fs.Config),
 	}
 	f.features = (&fs.Features{
 		ReadMimeType:  true,
@@ -787,7 +1050,10 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 			Bucket: &f.bucket,
 			Key:    &directory,
 		}
-		_, err = f.c.HeadObject(&req)
+		err = f.pacer.Call(func() (bool, error) {
+			_, err = f.c.HeadObject(&req)
+			return shouldRetry(err)
+		})
 		if err == nil {
 			f.root = path.Dir(directory)
 			if f.root == "." {
@@ -864,7 +1130,12 @@ func (f *Fs) list(dir string, recurse bool, fn listFn) error {
 			MaxKeys:   &maxKeys,
 			Marker:    marker,
 		}
-		resp, err := f.c.ListObjects(&req)
+		var resp *s3.ListObjectsOutput
+		var err error
+		err = f.pacer.Call(func() (bool, error) {
+			resp, err = f.c.ListObjects(&req)
+			return shouldRetry(err)
+		})
 		if err != nil {
 			if awsErr, ok := err.(awserr.RequestFailure); ok {
 				if awsErr.StatusCode() == http.StatusNotFound {
@@ -989,7 +1260,11 @@ func (f *Fs) listBuckets(dir string) (entries fs.DirEntries, err error) {
 		return nil, fs.ErrorListBucketRequired
 	}
 	req := s3.ListBucketsInput{}
-	resp, err := f.c.ListBuckets(&req)
+	var resp *s3.ListBucketsOutput
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.c.ListBuckets(&req)
+		return shouldRetry(err)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1074,7 +1349,10 @@ func (f *Fs) dirExists() (bool, error) {
 	req := s3.HeadBucketInput{
 		Bucket: &f.bucket,
 	}
-	_, err := f.c.HeadBucket(&req)
+	err := f.pacer.Call(func() (bool, error) {
+		_, err := f.c.HeadBucket(&req)
+		return shouldRetry(err)
+	})
 	if err == nil {
 		return true, nil
 	}
@@ -1104,14 +1382,17 @@ func (f *Fs) Mkdir(dir string) error {
 	}
 	req := s3.CreateBucketInput{
 		Bucket: &f.bucket,
-		ACL:    &f.opt.ACL,
+		ACL:    &f.opt.BucketACL,
 	}
 	if f.opt.LocationConstraint != "" {
 		req.CreateBucketConfiguration = &s3.CreateBucketConfiguration{
 			LocationConstraint: &f.opt.LocationConstraint,
 		}
 	}
-	_, err := f.c.CreateBucket(&req)
+	err := f.pacer.Call(func() (bool, error) {
+		_, err := f.c.CreateBucket(&req)
+		return shouldRetry(err)
+	})
 	if err, ok := err.(awserr.Error); ok {
 		if err.Code() == "BucketAlreadyOwnedByYou" {
 			err = nil
@@ -1120,6 +1401,7 @@ func (f *Fs) Mkdir(dir string) error {
 	if err == nil {
 		f.bucketOK = true
 		f.bucketDeleted = false
+		fs.Infof(f, "Bucket created with ACL %q", *req.ACL)
 	}
 	return err
 }
@@ -1136,10 +1418,14 @@ func (f *Fs) Rmdir(dir string) error {
 	req := s3.DeleteBucketInput{
 		Bucket: &f.bucket,
 	}
-	_, err := f.c.DeleteBucket(&req)
+	err := f.pacer.Call(func() (bool, error) {
+		_, err := f.c.DeleteBucket(&req)
+		return shouldRetry(err)
+	})
 	if err == nil {
 		f.bucketOK = false
 		f.bucketDeleted = true
+		fs.Infof(f, "Bucket deleted")
 	}
 	return err
 }
@@ -1179,11 +1465,24 @@ func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
 	source := pathEscape(srcFs.bucket + "/" + srcFs.root + srcObj.remote)
 	req := s3.CopyObjectInput{
 		Bucket:            &f.bucket,
+		ACL:               &f.opt.ACL,
 		Key:               &key,
 		CopySource:        &source,
 		MetadataDirective: aws.String(s3.MetadataDirectiveCopy),
 	}
-	_, err = f.c.CopyObject(&req)
+	if f.opt.ServerSideEncryption != "" {
+		req.ServerSideEncryption = &f.opt.ServerSideEncryption
+	}
+	if f.opt.SSEKMSKeyID != "" {
+		req.SSEKMSKeyId = &f.opt.SSEKMSKeyID
+	}
+	if f.opt.StorageClass != "" {
+		req.StorageClass = &f.opt.StorageClass
+	}
+	err = f.pacer.Call(func() (bool, error) {
+		_, err = f.c.CopyObject(&req)
+		return shouldRetry(err)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1260,7 +1559,12 @@ func (o *Object) readMetaData() (err error) {
 		Bucket: &o.fs.bucket,
 		Key:    &key,
 	}
-	resp, err := o.fs.c.HeadObject(&req)
+	var resp *s3.HeadObjectOutput
+	err = o.fs.pacer.Call(func() (bool, error) {
+		var err error
+		resp, err = o.fs.c.HeadObject(&req)
+		return shouldRetry(err)
+	})
 	if err != nil {
 		if awsErr, ok := err.(awserr.RequestFailure); ok {
 			if awsErr.StatusCode() == http.StatusNotFound {
@@ -1344,7 +1648,19 @@ func (o *Object) SetModTime(modTime time.Time) error {
 		Metadata:          o.meta,
 		MetadataDirective: &directive,
 	}
-	_, err = o.fs.c.CopyObject(&req)
+	if o.fs.opt.ServerSideEncryption != "" {
+		req.ServerSideEncryption = &o.fs.opt.ServerSideEncryption
+	}
+	if o.fs.opt.SSEKMSKeyID != "" {
+		req.SSEKMSKeyId = &o.fs.opt.SSEKMSKeyID
+	}
+	if o.fs.opt.StorageClass != "" {
+		req.StorageClass = &o.fs.opt.StorageClass
+	}
+	err = o.fs.pacer.Call(func() (bool, error) {
+		_, err := o.fs.c.CopyObject(&req)
+		return shouldRetry(err)
+	})
 	return err
 }
 
@@ -1371,7 +1687,12 @@ func (o *Object) Open(options ...fs.OpenOption) (in io.ReadCloser, err error) {
 			}
 		}
 	}
-	resp, err := o.fs.c.GetObject(&req)
+	var resp *s3.GetObjectOutput
+	err = o.fs.pacer.Call(func() (bool, error) {
+		var err error
+		resp, err = o.fs.c.GetObject(&req)
+		return shouldRetry(err)
+	})
 	if err, ok := err.(awserr.RequestFailure); ok {
 		if err.Code() == "InvalidObjectState" {
 			return nil, errors.Errorf("Object in GLACIER, restore first: %v", key)
@@ -1392,38 +1713,46 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 	modTime := src.ModTime()
 	size := src.Size()
 
-	uploader := s3manager.NewUploader(o.fs.ses, func(u *s3manager.Uploader) {
-		u.Concurrency = o.fs.opt.UploadConcurrency
-		u.LeavePartsOnError = false
-		u.S3 = o.fs.c
-		u.PartSize = int64(o.fs.opt.ChunkSize)
+	multipart := size < 0 || size >= int64(o.fs.opt.UploadCutoff)
+	var uploader *s3manager.Uploader
+	if multipart {
+		uploader = s3manager.NewUploader(o.fs.ses, func(u *s3manager.Uploader) {
+			u.Concurrency = o.fs.opt.UploadConcurrency
+			u.LeavePartsOnError = false
+			u.S3 = o.fs.c
+			u.PartSize = int64(o.fs.opt.ChunkSize)
 
-		if size == -1 {
-			// Make parts as small as possible while still being able to upload to the
-			// S3 file size limit. Rounded up to nearest MB.
-			u.PartSize = (((maxFileSize / s3manager.MaxUploadParts) >> 20) + 1) << 20
-			return
-		}
-		// Adjust PartSize until the number of parts is small enough.
-		if size/u.PartSize >= s3manager.MaxUploadParts {
-			// Calculate partition size rounded up to the nearest MB
-			u.PartSize = (((size / s3manager.MaxUploadParts) >> 20) + 1) << 20
-		}
-	})
+			if size == -1 {
+				// Make parts as small as possible while still being able to upload to the
+				// S3 file size limit. Rounded up to nearest MB.
+				u.PartSize = (((maxFileSize / s3manager.MaxUploadParts) >> 20) + 1) << 20
+				return
+			}
+			// Adjust PartSize until the number of parts is small enough.
+			if size/u.PartSize >= s3manager.MaxUploadParts {
+				// Calculate partition size rounded up to the nearest MB
+				u.PartSize = (((size / s3manager.MaxUploadParts) >> 20) + 1) << 20
+			}
+		})
+	}
 
 	// Set the mtime in the meta data
 	metadata := map[string]*string{
 		metaMtime: aws.String(swift.TimeToFloatString(modTime)),
 	}
 
-	if !o.fs.opt.DisableChecksum && size > uploader.PartSize {
+	// read the md5sum if available for non multpart and if
+	// disable checksum isn't present.
+	var md5sum string
+	if !multipart || !o.fs.opt.DisableChecksum {
 		hash, err := src.Hash(hash.MD5)
-
 		if err == nil && matchMd5.MatchString(hash) {
 			hashBytes, err := hex.DecodeString(hash)
-
 			if err == nil {
-				metadata[metaMD5Hash] = aws.String(base64.StdEncoding.EncodeToString(hashBytes))
+				md5sum = base64.StdEncoding.EncodeToString(hashBytes)
+				if multipart {
+					metadata[metaMD5Hash] = &md5sum
+				}
 			}
 		}
 	}
@@ -1432,27 +1761,98 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 	mimeType := fs.MimeType(src)
 
 	key := o.fs.root + o.remote
-	req := s3manager.UploadInput{
-		Bucket:      &o.fs.bucket,
-		ACL:         &o.fs.opt.ACL,
-		Key:         &key,
-		Body:        in,
-		ContentType: &mimeType,
-		Metadata:    metadata,
-		//ContentLength: &size,
-	}
-	if o.fs.opt.ServerSideEncryption != "" {
-		req.ServerSideEncryption = &o.fs.opt.ServerSideEncryption
-	}
-	if o.fs.opt.SSEKMSKeyID != "" {
-		req.SSEKMSKeyId = &o.fs.opt.SSEKMSKeyID
-	}
-	if o.fs.opt.StorageClass != "" {
-		req.StorageClass = &o.fs.opt.StorageClass
-	}
-	_, err = uploader.Upload(&req)
-	if err != nil {
-		return err
+	if multipart {
+		req := s3manager.UploadInput{
+			Bucket:      &o.fs.bucket,
+			ACL:         &o.fs.opt.ACL,
+			Key:         &key,
+			Body:        in,
+			ContentType: &mimeType,
+			Metadata:    metadata,
+			//ContentLength: &size,
+		}
+		if o.fs.opt.ServerSideEncryption != "" {
+			req.ServerSideEncryption = &o.fs.opt.ServerSideEncryption
+		}
+		if o.fs.opt.SSEKMSKeyID != "" {
+			req.SSEKMSKeyId = &o.fs.opt.SSEKMSKeyID
+		}
+		if o.fs.opt.StorageClass != "" {
+			req.StorageClass = &o.fs.opt.StorageClass
+		}
+		err = o.fs.pacer.CallNoRetry(func() (bool, error) {
+			_, err = uploader.Upload(&req)
+			return shouldRetry(err)
+		})
+		if err != nil {
+			return err
+		}
+	} else {
+		req := s3.PutObjectInput{
+			Bucket:      &o.fs.bucket,
+			ACL:         &o.fs.opt.ACL,
+			Key:         &key,
+			ContentType: &mimeType,
+			Metadata:    metadata,
+		}
+		if md5sum != "" {
+			req.ContentMD5 = &md5sum
+		}
+		if o.fs.opt.ServerSideEncryption != "" {
+			req.ServerSideEncryption = &o.fs.opt.ServerSideEncryption
+		}
+		if o.fs.opt.SSEKMSKeyID != "" {
+			req.SSEKMSKeyId = &o.fs.opt.SSEKMSKeyID
+		}
+		if o.fs.opt.StorageClass != "" {
+			req.StorageClass = &o.fs.opt.StorageClass
+		}
+
+		// Create the request
+		putObj, _ := o.fs.c.PutObjectRequest(&req)
+
+		// Sign it so we can upload using a presigned request.
+		//
+		// Note the SDK doesn't currently support streaming to
+		// PutObject so we'll use this work-around.
+		url, headers, err := putObj.PresignRequest(15 * time.Minute)
+		if err != nil {
+			return errors.Wrap(err, "s3 upload: sign request")
+		}
+
+		// Set request to nil if empty so as not to make chunked encoding
+		if size == 0 {
+			in = nil
+		}
+
+		// create the vanilla http request
+		httpReq, err := http.NewRequest("PUT", url, in)
+		if err != nil {
+			return errors.Wrap(err, "s3 upload: new request")
+		}
+
+		// set the headers we signed and the length
+		httpReq.Header = headers
+		httpReq.ContentLength = size
+
+		err = o.fs.pacer.CallNoRetry(func() (bool, error) {
+			resp, err := o.fs.srv.Do(httpReq)
+			if err != nil {
+				return shouldRetry(err)
+			}
+			body, err := rest.ReadBody(resp)
+			if err != nil {
+				return shouldRetry(err)
+			}
+			if resp.StatusCode >= 200 && resp.StatusCode < 299 {
+				return false, nil
+			}
+			err = errors.Errorf("s3 upload: %s: %s", resp.Status, body)
+			return fserrors.ShouldRetryHTTP(resp, retryErrorCodes), err
+		})
+		if err != nil {
+			return err
+		}
 	}
 
 	// Read the metadata from the newly created object
@@ -1468,7 +1868,10 @@ func (o *Object) Remove() error {
 		Bucket: &o.fs.bucket,
 		Key:    &key,
 	}
-	_, err := o.fs.c.DeleteObject(&req)
+	err := o.fs.pacer.Call(func() (bool, error) {
+		_, err := o.fs.c.DeleteObject(&req)
+		return shouldRetry(err)
+	})
 	return err
 }
 

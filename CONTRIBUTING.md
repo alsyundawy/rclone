@@ -21,14 +21,14 @@ with the [latest beta of rclone](https://beta.rclone.org/):
 ## Submitting a pull request ##
 
 If you find a bug that you'd like to fix, or a new feature that you'd
-like to implement then please submit a pull request via Github.
+like to implement then please submit a pull request via GitHub.
 
 If it is a big feature then make an issue first so it can be discussed.
 
 You'll need a Go environment set up with GOPATH set.  See [the Go
 getting started docs](https://golang.org/doc/install) for more info.
 
-First in your web browser press the fork button on [rclone's Github
+First in your web browser press the fork button on [rclone's GitHub
 page](https://github.com/ncw/rclone).
 
 Now in your terminal
@@ -64,22 +64,31 @@ packages which you can install with
 
 Make sure you
 
-  * Add documentation for a new feature (see below for where)
-  * Add unit tests for a new feature
+  * Add [documentation](#writing-documentation) for a new feature.
+  * Follow the [commit message guidelines](#commit-messages).
+  * Add [unit tests](#testing) for a new feature
   * squash commits down to one per feature
-  * rebase to master `git rebase master`
+  * rebase to master with `git rebase master`
 
 When you are done with that
 
-  git push origin my-new-feature
+    git push origin my-new-feature
 
-Go to the Github website and click [Create pull
+Go to the GitHub website and click [Create pull
 request](https://help.github.com/articles/creating-a-pull-request/).
 
 You patch will get reviewed and you might get asked to fix some stuff.
 
 If so, then make the changes in the same branch, squash the commits,
-rebase it to master then push it to Github with `--force`.
+rebase it to master then push it to GitHub with `--force`.
+
+## Enabling CI for your fork ##
+
+The CI config files for rclone have taken care of forks of the project, so you can enable CI for your fork repo easily.
+
+rclone currently uses [Travis CI](https://travis-ci.org/), [AppVeyor](https://ci.appveyor.com/), and
+[Circle CI](https://circleci.com/) to build the project. To enable them for your fork, simply go into their
+websites, find your fork of rclone, and enable building there.
 
 ## Testing ##
 
@@ -113,6 +122,13 @@ but they can be run against any of the remotes.
 
     cd fs/operations
     go test -v -remote TestDrive:
+
+If you want to use the integration test framework to run these tests
+all together with an HTML report and test retries then from the
+project root:
+
+    go install github.com/ncw/rclone/fstest/test_all
+    test_all -backend drive
 
 If you want to run all the integration tests against all the remotes,
 then change into the project root and run
@@ -173,10 +189,14 @@ with modules beneath.
 
 If you are adding a new feature then please update the documentation.
 
-If you add a new flag, then if it is a general flag, document it in
+If you add a new general flag (not for a backend), then document it in
 `docs/content/docs.md` - the flags there are supposed to be in
-alphabetical order.  If it is a remote specific flag, then document it
-in `docs/content/remote.md`.
+alphabetical order.
+
+If you add a new backend option/flag, then it should be documented in
+the source file in the `Help:` field.  The first line of this is used
+for the flag help, the remainder is shown to the user in `rclone
+config` and is added to the docs with `make backenddocs`.
 
 The only documentation you need to edit are the `docs/content/*.md`
 files.  The MANUAL.*, rclone.1, web site etc are all auto generated
@@ -195,13 +215,19 @@ file.
 ## Commit messages ##
 
 Please make the first line of your commit message a summary of the
-change, and prefix it with the directory of the change followed by a
-colon.  The changelog gets made by looking at just these first lines
-so make it good!
+change that a user (not a developer) of rclone would like to read, and
+prefix it with the directory of the change followed by a colon.  The
+changelog gets made by looking at just these first lines so make it
+good!
 
 If you have more to say about the commit, then enter a blank line and
 carry on the description.  Remember to say why the change was needed -
 the commit itself shows what was changed.
+
+Writing more is better than less.  Comparing the behaviour before the
+change to that after the change is very useful.  Imagine you are
+writing to yourself in 12 months time when you've forgotten everything
+about what you just did and you need to get up to speed quickly.
 
 If the change fixes an issue then write `Fixes #1234` in the commit
 message.  This can be on the subject line if it will fit.  If you
@@ -250,9 +276,8 @@ To add a dependency `github.com/ncw/new_dependency` see the
 instructions below.  These will fetch the dependency, add it to
 `go.mod` and `go.sum` and vendor it for older go versions.
 
-    export GO111MODULE=on
-    go get github.com/ncw/new_dependency
-    go mod vendor
+    GO111MODULE=on go get github.com/ncw/new_dependency
+    GO111MODULE=on go mod vendor
 
 You can add constraints on that package when doing `go get` (see the
 go docs linked above), but don't unless you really need to.
@@ -267,9 +292,8 @@ in `vendor`.
 
 If you need to update a dependency then run
 
-    export GO111MODULE=on
-    go get -u github.com/pkg/errors
-    go mod vendor
+    GO111MODULE=on go get -u github.com/pkg/errors
+    GO111MODULE=on go mod vendor
 
 Check in in a single commit as above.
 
@@ -326,7 +350,13 @@ Unit tests
 
 Integration tests
 
-  * Add your fs to `fstest/test_all/test_all.go`
+  * Add your backend to `fstest/test_all/config.yaml`
+      * Once you've done that then you can use the integration test framework from the project root:
+      * go install ./...
+      * test_all -backend remote
+
+Or if you want to run the integration tests manually:
+
   * Make sure integration tests pass with
       * `cd fs/operations`
       * `go test -v -remote TestRemote:`
@@ -341,11 +371,10 @@ See the [testing](#testing) section for more information on integration tests.
 
 Add your fs to the docs - you'll need to pick an icon for it from [fontawesome](http://fontawesome.io/icons/).  Keep lists of remotes in alphabetical order but with the local file system last.
 
-  * `README.md` - main Github page
-  * `docs/content/remote.md` - main docs page
+  * `README.md` - main GitHub page
+  * `docs/content/remote.md` - main docs page (note the backend options are automatically added to this file with `make backenddocs`)
   * `docs/content/overview.md` - overview docs
   * `docs/content/docs.md` - list of remotes in config section
   * `docs/content/about.md` - front page of rclone.org
   * `docs/layouts/chrome/navbar.html` - add it to the website navigation
   * `bin/make_manual.py` - add the page to the `docs` constant
-  * `cmd/cmd.go` - the main help for rclone

@@ -15,8 +15,8 @@ work on all the remote storage systems.
 ### Can I copy the config from one machine to another ###
 
 Sure!  Rclone stores all of its config in a single file.  If you want
-to find this file, the simplest way is to run `rclone -h` and look at
-the help for the `--config` flag which will tell you where it is.
+to find this file, run `rclone config file` which will tell you where
+it is.
 
 See the [remote setup docs](/remote_setup/) for more info.
 
@@ -90,17 +90,37 @@ just requires writing the algorithm to do it.
 
 ### Can I use rclone with an HTTP proxy? ###
 
-Yes. rclone will use the environment variables `HTTP_PROXY`,
-`HTTPS_PROXY` and `NO_PROXY`, similar to cURL and other programs.
+Yes. rclone will follow the standard environment variables for
+proxies, similar to cURL and other programs.
 
-`HTTPS_PROXY` takes precedence over `HTTP_PROXY` for https requests.
+In general the variables are called `http_proxy` (for services reached
+over `http`) and `https_proxy` (for services reached over `https`).  Most
+public services will be using `https`, but you may wish to set both.
 
-The environment values may be either a complete URL or a "host[:port]",
-in which case the "http" scheme is assumed.
+If you ever use `FTP` then you would need to set `ftp_proxy`.
+
+The content of the variable is `protocol://server:port`.  The protocol
+value is the one used to talk to the proxy server, itself, and is commonly
+either `http` or `socks5`.
+
+Slightly annoyingly, there is no _standard_ for the name; some applications
+may use `http_proxy` but another one `HTTP_PROXY`.  The `Go` libraries
+used by `rclone` will try both variations, but you may wish to set all
+possibilities.  So, on Linux, you may end up with code similar to
+
+    export http_proxy=http://proxyserver:12345
+    export https_proxy=$http_proxy
+    export HTTP_PROXY=$http_proxy
+    export HTTPS_PROXY=$http_proxy
 
 The `NO_PROXY` allows you to disable the proxy for specific hosts.
 Hosts must be comma separated, and can contain domains or parts.
 For instance "foo.com" also matches "bar.foo.com".
+
+e.g.
+
+    export no_proxy=localhost,127.0.0.0/8,my.host.name
+    export NO_PROXY=$no_proxy
 
 ### Rclone gives x509: failed to load system roots and no roots provided error ###
 

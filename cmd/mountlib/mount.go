@@ -4,6 +4,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -62,17 +63,37 @@ func checkMountEmpty(mountpoint string) error {
 	return nil
 }
 
+// Check the root doesn't overlap the mountpoint
+func checkMountpointOverlap(root, mountpoint string) error {
+	abs := func(x string) string {
+		if absX, err := filepath.EvalSymlinks(x); err == nil {
+			x = absX
+		}
+		if absX, err := filepath.Abs(x); err == nil {
+			x = absX
+		}
+		x = filepath.ToSlash(x)
+		if !strings.HasSuffix(x, "/") {
+			x += "/"
+		}
+		return x
+	}
+	rootAbs, mountpointAbs := abs(root), abs(mountpoint)
+	if strings.HasPrefix(rootAbs, mountpointAbs) || strings.HasPrefix(mountpointAbs, rootAbs) {
+		return errors.Errorf("mount point %q and directory to be mounted %q mustn't overlap", mountpoint, root)
+	}
+	return nil
+}
+
 // NewMountCommand makes a mount command with the given name and Mount function
 func NewMountCommand(commandName string, Mount func(f fs.Fs, mountpoint string) error) *cobra.Command {
 	var commandDefintion = &cobra.Command{
 		Use:   commandName + " remote:path /path/to/mountpoint",
-		Short: `Mount the remote as a mountpoint. **EXPERIMENTAL**`,
+		Short: `Mount the remote as file system on a mountpoint.`,
 		Long: `
 rclone ` + commandName + ` allows Linux, FreeBSD, macOS and Windows to
 mount any of Rclone's cloud storage systems as a file system with
 FUSE.
-
-This is **EXPERIMENTAL** - use with care.
 
 First set up your remote using ` + "`rclone config`" + `.  Check it works with ` + "`rclone ls`" + ` etc.
 
@@ -148,8 +169,8 @@ File systems expect things to be 100% reliable, whereas cloud storage
 systems are a long way from 100% reliable. The rclone sync/copy
 commands cope with this with lots of retries.  However rclone ` + commandName + `
 can't use retries in the same way without making local copies of the
-uploads. Look at the **EXPERIMENTAL** [file caching](#file-caching)
-for solutions to make ` + commandName + ` mount more reliable.
+uploads. Look at the [file caching](#file-caching)
+for solutions to make ` + commandName + ` more reliable.
 
 ### Attribute caching
 
@@ -222,18 +243,24 @@ be copied to the vfs cache before opening with --vfs-cache-mode full.
 				config.PassConfigKeyForDaemonization = true
 			}
 
+			mountpoint := args[1]
 			fdst := cmd.NewFsDir(args)
+			if fdst.Name() == "" || fdst.Name() == "local" {
+				err := checkMountpointOverlap(fdst.Root(), mountpoint)
+				if err != nil {
+					log.Fatalf("Fatal error: %v", err)
+				}
+			}
 
 			// Show stats if the user has specifically requested them
 			if cmd.ShowStats() {
-				stopStats := cmd.StartStats()
-				defer close(stopStats)
+				defer cmd.StartStats()()
 			}
 
 			// Skip checkMountEmpty if --allow-non-empty flag is used or if
 			// the Operating System is Windows
 			if !AllowNonEmpty && runtime.GOOS != "windows" {
-				err := checkMountEmpty(args[1])
+				err := checkMountEmpty(mountpoint)
 				if err != nil {
 					log.Fatalf("Fatal error: %v", err)
 				}
@@ -256,7 +283,7 @@ be copied to the vfs cache before opening with --vfs-cache-mode full.
 				}
 			}
 
-			err := Mount(fdst, args[1])
+			err := Mount(fdst, mountpoint)
 			if err != nil {
 				log.Fatalf("Fatal error: %v", err)
 			}

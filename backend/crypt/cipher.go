@@ -17,11 +17,9 @@ import (
 	"github.com/ncw/rclone/fs"
 	"github.com/ncw/rclone/fs/accounting"
 	"github.com/pkg/errors"
-
+	"github.com/rfjakob/eme"
 	"golang.org/x/crypto/nacl/secretbox"
 	"golang.org/x/crypto/scrypt"
-
-	"github.com/rfjakob/eme"
 )
 
 // Constants
@@ -43,6 +41,7 @@ var (
 	ErrorBadDecryptControlChar   = errors.New("bad decryption - contains control chars")
 	ErrorNotAMultipleOfBlocksize = errors.New("not a multiple of blocksize")
 	ErrorTooShortAfterDecode     = errors.New("too short after base32 decode")
+	ErrorTooLongAfterDecode      = errors.New("too long after base32 decode")
 	ErrorEncryptedFileTooShort   = errors.New("file is too short to be encrypted")
 	ErrorEncryptedFileBadHeader  = errors.New("file has truncated block header")
 	ErrorEncryptedBadMagic       = errors.New("not an encrypted file - bad magic string")
@@ -285,6 +284,9 @@ func (c *cipher) decryptSegment(ciphertext string) (string, error) {
 	if len(rawCiphertext) == 0 {
 		// not possible if decodeFilename() working correctly
 		return "", ErrorTooShortAfterDecode
+	}
+	if len(rawCiphertext) > 2048 {
+		return "", ErrorTooLongAfterDecode
 	}
 	paddedPlaintext := eme.Transform(c.block, c.nameTweak[:], rawCiphertext, eme.DirectionDecrypt)
 	plaintext, err := pkcs7.Unpad(nameCipherBlockSize, paddedPlaintext)

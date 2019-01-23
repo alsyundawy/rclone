@@ -62,6 +62,7 @@ type ConfigInfo struct {
 	MaxDepth              int
 	IgnoreSize            bool
 	IgnoreChecksum        bool
+	NoTraverse            bool
 	NoUpdateModTime       bool
 	DataRateUnit          string
 	BackupDir             string
@@ -84,6 +85,7 @@ type ConfigInfo struct {
 	MaxBacklog            int
 	StatsOneLine          bool
 	Progress              bool
+	Cookie                bool
 }
 
 // NewConfig creates a new config with everything set to the default
@@ -108,7 +110,7 @@ func NewConfig() *ConfigInfo {
 	c.BufferSize = SizeSuffix(16 << 20)
 	c.UserAgent = "rclone/" + Version
 	c.StreamingUploadCutoff = SizeSuffix(100 * 1024)
-	c.StatsFileNameLength = 40
+	c.StatsFileNameLength = 45
 	c.AskPassword = true
 	c.TPSLimitBurst = 1
 	c.MaxTransfer = -1

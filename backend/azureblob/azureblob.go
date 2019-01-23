@@ -1,12 +1,13 @@
 // Package azureblob provides an interface to the Microsoft Azure blob object storage system
 
-// +build !freebsd,!netbsd,!openbsd,!plan9,!solaris,go1.8
+// +build !plan9,!solaris,go1.8
 
 package azureblob
 
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -21,12 +22,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Azure/azure-storage-blob-go/2018-03-28/azblob"
+	"github.com/Azure/azure-pipeline-go/pipeline"
+	"github.com/Azure/azure-storage-blob-go/azblob"
 	"github.com/ncw/rclone/fs"
 	"github.com/ncw/rclone/fs/accounting"
 	"github.com/ncw/rclone/fs/config/configmap"
 	"github.com/ncw/rclone/fs/config/configstruct"
 	"github.com/ncw/rclone/fs/fserrors"
+	"github.com/ncw/rclone/fs/fshttp"
 	"github.com/ncw/rclone/fs/hash"
 	"github.com/ncw/rclone/fs/walk"
 	"github.com/ncw/rclone/lib/pacer"
@@ -37,18 +40,19 @@ const (
 	minSleep              = 10 * time.Millisecond
 	maxSleep              = 10 * time.Second
 	decayConstant         = 1    // bigger for slower decay, exponential
-	listChunkSize         = 5000 // number of items to read at once
+	maxListChunkSize      = 5000 // number of items to read at once
 	modTimeKey            = "mtime"
 	timeFormatIn          = time.RFC3339
 	timeFormatOut         = "2006-01-02T15:04:05.000000000Z07:00"
 	maxTotalParts         = 50000 // in multipart upload
 	storageDefaultBaseURL = "blob.core.windows.net"
 	// maxUncommittedSize = 9 << 30 // can't upload bigger than this
-	defaultChunkSize    = 4 * 1024 * 1024
-	maxChunkSize        = 100 * 1024 * 1024
-	defaultUploadCutoff = 256 * 1024 * 1024
-	maxUploadCutoff     = 256 * 1024 * 1024
+	defaultChunkSize    = 4 * fs.MebiByte
+	maxChunkSize        = 100 * fs.MebiByte
+	defaultUploadCutoff = 256 * fs.MebiByte
+	maxUploadCutoff     = 256 * fs.MebiByte
 	defaultAccessTier   = azblob.AccessTierNone
+	maxTryTimeout       = time.Hour * 24 * 365 //max time of an azure web request response window (whether or not data is flowing)
 )
 
 // Register with Fs
@@ -72,18 +76,44 @@ func init() {
 			Advanced: true,
 		}, {
 			Name:     "upload_cutoff",
-			Help:     "Cutoff for switching to chunked upload.",
+			Help:     "Cutoff for switching to chunked upload (<= 256MB).",
 			Default:  fs.SizeSuffix(defaultUploadCutoff),
 			Advanced: true,
 		}, {
-			Name:     "chunk_size",
-			Help:     "Upload chunk size. Must fit in memory.",
+			Name: "chunk_size",
+			Help: `Upload chunk size (<= 100MB).
+
+Note that this is stored in memory and there may be up to
+"--transfers" chunks stored at once in memory.`,
 			Default:  fs.SizeSuffix(defaultChunkSize),
 			Advanced: true,
 		}, {
+			Name: "list_chunk",
+			Help: `Size of blob list.
+
+This sets the number of blobs requested in each listing chunk. Default
+is the maximum, 5000. "List blobs" requests are permitted 2 minutes
+per megabyte to complete. If an operation is taking longer than 2
+minutes per megabyte on average, it will time out (
+[source](https://docs.microsoft.com/en-us/rest/api/storageservices/setting-timeouts-for-blob-service-operations#exceptions-to-default-timeout-interval)
+). This can be used to limit the number of blobs items to return, to
+avoid the time out.`,
+			Default:  maxListChunkSize,
+			Advanced: true,
+		}, {
 			Name: "access_tier",
-			Help: "Access tier of blob, supports hot, cool and archive tiers.\nArchived blobs can be restored by setting access tier to hot or cool." +
-				" Leave blank if you intend to use default access tier, which is set at account level",
+			Help: `Access tier of blob: hot, cool or archive.
+
+Archived blobs can be restored by setting access tier to hot or
+cool. Leave blank if you intend to use default access tier, which is
+set at account level
+
+If there is no "access tier" specified, rclone doesn't apply any tier.
+rclone performs "Set Tier" operation on blobs while uploading, if objects
+are not modified, specifying "access tier" to new one will have no effect.
+If blobs are in "archive tier" at remote, trying to perform data transfer
+operations from remote will not be allowed. User should first restore by
+tiering blob to "Hot" or "Cool".`,
 			Advanced: true,
 		}},
 	})
@@ -91,13 +121,14 @@ func init() {
 
 // Options defines the configuration for this backend
 type Options struct {
-	Account      string        `config:"account"`
-	Key          string        `config:"key"`
-	Endpoint     string        `config:"endpoint"`
-	SASURL       string        `config:"sas_url"`
-	UploadCutoff fs.SizeSuffix `config:"upload_cutoff"`
-	ChunkSize    fs.SizeSuffix `config:"chunk_size"`
-	AccessTier   string        `config:"access_tier"`
+	Account       string        `config:"account"`
+	Key           string        `config:"key"`
+	Endpoint      string        `config:"endpoint"`
+	SASURL        string        `config:"sas_url"`
+	UploadCutoff  fs.SizeSuffix `config:"upload_cutoff"`
+	ChunkSize     fs.SizeSuffix `config:"chunk_size"`
+	ListChunkSize uint          `config:"list_chunk"`
+	AccessTier    string        `config:"access_tier"`
 }
 
 // Fs represents a remote azure server
@@ -106,6 +137,7 @@ type Fs struct {
 	root             string                // the path we are working on if any
 	opt              Options               // parsed config options
 	features         *fs.Features          // optional features
+	client           *http.Client          // http client we are using
 	svcURL           *azblob.ServiceURL    // reference to serviceURL
 	cntURL           *azblob.ContainerURL  // reference to containerURL
 	container        string                // the container we are working on
@@ -171,6 +203,19 @@ func parsePath(path string) (container, directory string, err error) {
 	return
 }
 
+// validateAccessTier checks if azureblob supports user supplied tier
+func validateAccessTier(tier string) bool {
+	switch tier {
+	case string(azblob.AccessTierHot),
+		string(azblob.AccessTierCool),
+		string(azblob.AccessTierArchive):
+		// valid cases
+		return true
+	default:
+		return false
+	}
+}
+
 // retryErrorCodes is a slice of error codes that we will retry
 var retryErrorCodes = []int{
 	401, // Unauthorized (eg "Token has expired")
@@ -196,6 +241,72 @@ func (f *Fs) shouldRetry(err error) (bool, error) {
 	return fserrors.ShouldRetry(err), err
 }
 
+func checkUploadChunkSize(cs fs.SizeSuffix) error {
+	const minChunkSize = fs.Byte
+	if cs < minChunkSize {
+		return errors.Errorf("%s is less than %s", cs, minChunkSize)
+	}
+	if cs > maxChunkSize {
+		return errors.Errorf("%s is greater than %s", cs, maxChunkSize)
+	}
+	return nil
+}
+
+func (f *Fs) setUploadChunkSize(cs fs.SizeSuffix) (old fs.SizeSuffix, err error) {
+	err = checkUploadChunkSize(cs)
+	if err == nil {
+		old, f.opt.ChunkSize = f.opt.ChunkSize, cs
+	}
+	return
+}
+
+func checkUploadCutoff(cs fs.SizeSuffix) error {
+	if cs > maxUploadCutoff {
+		return errors.Errorf("%v must be less than or equal to %v", cs, maxUploadCutoff)
+	}
+	return nil
+}
+
+func (f *Fs) setUploadCutoff(cs fs.SizeSuffix) (old fs.SizeSuffix, err error) {
+	err = checkUploadCutoff(cs)
+	if err == nil {
+		old, f.opt.UploadCutoff = f.opt.UploadCutoff, cs
+	}
+	return
+}
+
+// httpClientFactory creates a Factory object that sends HTTP requests
+// to a rclone's http.Client.
+//
+// copied from azblob.newDefaultHTTPClientFactory
+func httpClientFactory(client *http.Client) pipeline.Factory {
+	return pipeline.FactoryFunc(func(next pipeline.Policy, po *pipeline.PolicyOptions) pipeline.PolicyFunc {
+		return func(ctx context.Context, request pipeline.Request) (pipeline.Response, error) {
+			r, err := client.Do(request.WithContext(ctx))
+			if err != nil {
+				err = pipeline.NewError(err, "HTTP request failed")
+			}
+			return pipeline.NewHTTPResponse(r), err
+		}
+	})
+}
+
+// newPipeline creates a Pipeline using the specified credentials and options.
+//
+// this code was copied from azblob.NewPipeline
+func (f *Fs) newPipeline(c azblob.Credential, o azblob.PipelineOptions) pipeline.Pipeline {
+	// Closest to API goes first; closest to the wire goes last
+	factories := []pipeline.Factory{
+		azblob.NewTelemetryPolicyFactory(o.Telemetry),
+		azblob.NewUniqueRequestIDPolicyFactory(),
+		azblob.NewRetryPolicyFactory(o.Retry),
+		c,
+		pipeline.MethodFactoryMarker(), // indicates at what stage in the pipeline the method factory is invoked
+		azblob.NewRequestLogPolicyFactory(o.RequestLog),
+	}
+	return pipeline.NewPipeline(factories, pipeline.Options{HTTPSender: httpClientFactory(f.client), Log: o.Log})
+}
+
 // NewFs contstructs an Fs from the path, container:path
 func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	// Parse config into Options struct
@@ -205,11 +316,16 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		return nil, err
 	}
 
-	if opt.UploadCutoff > maxUploadCutoff {
-		return nil, errors.Errorf("azure: upload cutoff (%v) must be less than or equal to %v", opt.UploadCutoff, maxUploadCutoff)
+	err = checkUploadCutoff(opt.UploadCutoff)
+	if err != nil {
+		return nil, errors.Wrap(err, "azure: upload cutoff")
 	}
-	if opt.ChunkSize > maxChunkSize {
-		return nil, errors.Errorf("azure: chunk size can't be greater than %v - was %v", maxChunkSize, opt.ChunkSize)
+	err = checkUploadChunkSize(opt.ChunkSize)
+	if err != nil {
+		return nil, errors.Wrap(err, "azure: chunk size")
+	}
+	if opt.ListChunkSize > maxListChunkSize {
+		return nil, errors.Errorf("azure: blob list size can't be greater than %v - was %v", maxListChunkSize, opt.ListChunkSize)
 	}
 	container, directory, err := parsePath(root)
 	if err != nil {
@@ -221,16 +337,27 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 
 	if opt.AccessTier == "" {
 		opt.AccessTier = string(defaultAccessTier)
-	} else {
-		switch opt.AccessTier {
-		case string(azblob.AccessTierHot):
-		case string(azblob.AccessTierCool):
-		case string(azblob.AccessTierArchive):
-			// valid cases
-		default:
-			return nil, errors.Errorf("azure: Supported access tiers are %s, %s and %s", string(azblob.AccessTierHot), string(azblob.AccessTierCool), azblob.AccessTierArchive)
-		}
+	} else if !validateAccessTier(opt.AccessTier) {
+		return nil, errors.Errorf("Azure Blob: Supported access tiers are %s, %s and %s",
+			string(azblob.AccessTierHot), string(azblob.AccessTierCool), string(azblob.AccessTierArchive))
 	}
+
+	f := &Fs{
+		name:        name,
+		opt:         *opt,
+		container:   container,
+		root:        directory,
+		pacer:       pacer.New().SetMinSleep(minSleep).SetMaxSleep(maxSleep).SetDecayConstant(decayConstant).SetPacer(pacer.S3Pacer),
+		uploadToken: pacer.NewTokenDispenser(fs.Config.Transfers),
+		client:      fshttp.NewClient(fs.Config),
+	}
+	f.features = (&fs.Features{
+		ReadMimeType:  true,
+		WriteMimeType: true,
+		BucketBased:   true,
+		SetTier:       true,
+		GetTier:       true,
+	}).Fill(f)
 
 	var (
 		u            *url.URL
@@ -239,12 +366,16 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	)
 	switch {
 	case opt.Account != "" && opt.Key != "":
-		credential := azblob.NewSharedKeyCredential(opt.Account, opt.Key)
+		credential, err := azblob.NewSharedKeyCredential(opt.Account, opt.Key)
+		if err != nil {
+			return nil, errors.Wrapf(err, "Failed to parse credentials")
+		}
+
 		u, err = url.Parse(fmt.Sprintf("https://%s.%s", opt.Account, opt.Endpoint))
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to make azure storage url from account and endpoint")
 		}
-		pipeline := azblob.NewPipeline(credential, azblob.PipelineOptions{})
+		pipeline := f.newPipeline(credential, azblob.PipelineOptions{Retry: azblob.RetryOptions{TryTimeout: maxTryTimeout}})
 		serviceURL = azblob.NewServiceURL(*u, pipeline)
 		containerURL = serviceURL.NewContainerURL(container)
 	case opt.SASURL != "":
@@ -253,7 +384,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 			return nil, errors.Wrapf(err, "failed to parse SAS URL")
 		}
 		// use anonymous credentials in case of sas url
-		pipeline := azblob.NewPipeline(azblob.NewAnonymousCredential(), azblob.PipelineOptions{})
+		pipeline := f.newPipeline(azblob.NewAnonymousCredential(), azblob.PipelineOptions{Retry: azblob.RetryOptions{TryTimeout: maxTryTimeout}})
 		// Check if we have container level SAS or account level sas
 		parts := azblob.NewBlobURLParts(*u)
 		if parts.ContainerName != "" {
@@ -270,22 +401,9 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	default:
 		return nil, errors.New("Need account+key or connectionString or sasURL")
 	}
+	f.svcURL = &serviceURL
+	f.cntURL = &containerURL
 
-	f := &Fs{
-		name:        name,
-		opt:         *opt,
-		container:   container,
-		root:        directory,
-		svcURL:      &serviceURL,
-		cntURL:      &containerURL,
-		pacer:       pacer.New().SetMinSleep(minSleep).SetMaxSleep(maxSleep).SetDecayConstant(decayConstant),
-		uploadToken: pacer.NewTokenDispenser(fs.Config.Transfers),
-	}
-	f.features = (&fs.Features{
-		ReadMimeType:  true,
-		WriteMimeType: true,
-		BucketBased:   true,
-	}).Fill(f)
 	if f.root != "" {
 		f.root += "/"
 		// Check to see if the (container,directory) is actually an existing file
@@ -299,8 +417,8 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		}
 		_, err := f.NewObject(remote)
 		if err != nil {
-			if err == fs.ErrorObjectNotFound {
-				// File doesn't exist so return old f
+			if err == fs.ErrorObjectNotFound || err == fs.ErrorNotAFile {
+				// File doesn't exist or is a directory so return old f
 				f.root = oldRoot
 				return f, nil
 			}
@@ -356,6 +474,21 @@ func (o *Object) updateMetadataWithModTime(modTime time.Time) {
 	o.meta[modTimeKey] = modTime.Format(timeFormatOut)
 }
 
+// Returns whether file is a directory marker or not
+func isDirectoryMarker(size int64, metadata azblob.Metadata, remote string) bool {
+	// Directory markers are 0 length
+	if size == 0 {
+		// Note that metadata with hdi_isfolder = true seems to be a
+		// defacto standard for marking blobs as directories.
+		endsWithSlash := strings.HasSuffix(remote, "/")
+		if endsWithSlash || remote == "" || metadata["hdi_isfolder"] == "true" {
+			return true
+		}
+
+	}
+	return false
+}
+
 // listFn is called from list to handle an object
 type listFn func(remote string, object *azblob.BlobItem, isDirectory bool) error
 
@@ -391,6 +524,7 @@ func (f *Fs) list(dir string, recurse bool, maxResults uint, fn listFn) error {
 		MaxResults: int32(maxResults),
 	}
 	ctx := context.Background()
+	directoryMarkers := map[string]struct{}{}
 	for marker := (azblob.Marker{}); marker.NotDone(); {
 		var response *azblob.ListBlobsHierarchySegmentResponse
 		err := f.pacer.Call(func() (bool, error) {
@@ -420,13 +554,23 @@ func (f *Fs) list(dir string, recurse bool, maxResults uint, fn listFn) error {
 				continue
 			}
 			remote := file.Name[len(f.root):]
-			// Check for directory
-			isDirectory := strings.HasSuffix(remote, "/")
-			if isDirectory {
-				remote = remote[:len(remote)-1]
+			if isDirectoryMarker(*file.Properties.ContentLength, file.Metadata, remote) {
+				if strings.HasSuffix(remote, "/") {
+					remote = remote[:len(remote)-1]
+				}
+				err = fn(remote, file, true)
+				if err != nil {
+					return err
+				}
+				// Keep track of directory markers. If recursing then
+				// there will be no Prefixes so no need to keep track
+				if !recurse {
+					directoryMarkers[remote] = struct{}{}
+				}
+				continue // skip directory marker
 			}
 			// Send object
-			err = fn(remote, file, isDirectory)
+			err = fn(remote, file, false)
 			if err != nil {
 				return err
 			}
@@ -439,6 +583,10 @@ func (f *Fs) list(dir string, recurse bool, maxResults uint, fn listFn) error {
 				continue
 			}
 			remote = remote[len(f.root):]
+			// Don't send if already sent as a directory marker
+			if _, found := directoryMarkers[remote]; found {
+				continue
+			}
 			// Send object
 			err = fn(remote, nil, true)
 			if err != nil {
@@ -474,7 +622,7 @@ func (f *Fs) markContainerOK() {
 
 // listDir lists a single directory
 func (f *Fs) listDir(dir string) (entries fs.DirEntries, err error) {
-	err = f.list(dir, false, listChunkSize, func(remote string, object *azblob.BlobItem, isDirectory bool) error {
+	err = f.list(dir, false, f.opt.ListChunkSize, func(remote string, object *azblob.BlobItem, isDirectory bool) error {
 		entry, err := f.itemToDirEntry(remote, object, isDirectory)
 		if err != nil {
 			return err
@@ -545,7 +693,7 @@ func (f *Fs) ListR(dir string, callback fs.ListRCallback) (err error) {
 		return fs.ErrorListBucketRequired
 	}
 	list := walk.NewListRHelper(callback)
-	err = f.list(dir, true, listChunkSize, func(remote string, object *azblob.BlobItem, isDirectory bool) error {
+	err = f.list(dir, true, f.opt.ListChunkSize, func(remote string, object *azblob.BlobItem, isDirectory bool) error {
 		entry, err := f.itemToDirEntry(remote, object, isDirectory)
 		if err != nil {
 			return err
@@ -566,11 +714,11 @@ type listContainerFn func(*azblob.ContainerItem) error
 // listContainersToFn lists the containers to the function supplied
 func (f *Fs) listContainersToFn(fn listContainerFn) error {
 	params := azblob.ListContainersSegmentOptions{
-		MaxResults: int32(listChunkSize),
+		MaxResults: int32(f.opt.ListChunkSize),
 	}
 	ctx := context.Background()
 	for marker := (azblob.Marker{}); marker.NotDone(); {
-		var response *azblob.ListContainersResponse
+		var response *azblob.ListContainersSegmentResponse
 		err := f.pacer.Call(func() (bool, error) {
 			var err error
 			response, err = f.svcURL.ListContainersSegment(ctx, marker, params)
@@ -625,6 +773,11 @@ func (f *Fs) Mkdir(dir string) error {
 					f.containerOK = true
 					return false, nil
 				case azblob.ServiceCodeContainerBeingDeleted:
+					// From https://docs.microsoft.com/en-us/rest/api/storageservices/delete-container
+					// When a container is deleted, a container with the same name cannot be created
+					// for at least 30 seconds; the container may not be available for more than 30
+					// seconds if the service is still processing the request.
+					time.Sleep(6 * time.Second) // default 10 retries will be 60 seconds
 					f.containerDeleted = true
 					return true, err
 				}
@@ -642,7 +795,7 @@ func (f *Fs) Mkdir(dir string) error {
 // isEmpty checks to see if a given directory is empty and returns an error if not
 func (f *Fs) isEmpty(dir string) (err error) {
 	empty := true
-	err = f.list("", true, 1, func(remote string, object *azblob.BlobItem, isDirectory bool) error {
+	err = f.list(dir, true, 1, func(remote string, object *azblob.BlobItem, isDirectory bool) error {
 		empty = false
 		return nil
 	})
@@ -752,7 +905,7 @@ func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
 	var startCopy *azblob.BlobStartCopyFromURLResponse
 
 	err = f.pacer.Call(func() (bool, error) {
-		startCopy, err = dstBlobURL.StartCopyFromURL(ctx, *source, nil, options, options)
+		startCopy, err = dstBlobURL.StartCopyFromURL(ctx, *source, nil, azblob.ModifiedAccessConditions{}, options)
 		return f.shouldRetry(err)
 	})
 	if err != nil {
@@ -837,26 +990,37 @@ func (o *Object) setMetadata(metadata azblob.Metadata) {
 //  o.md5
 //  o.meta
 func (o *Object) decodeMetaDataFromPropertiesResponse(info *azblob.BlobGetPropertiesResponse) (err error) {
-	// NOTE - In BlobGetPropertiesResponse, Client library returns MD5 as base64 decoded string
-	// unlike BlobProperties in BlobItem (used in decodeMetadataFromBlob) which returns base64
-	// encoded bytes. Object needs to maintain this as base64 encoded string.
+	metadata := info.NewMetadata()
+	size := info.ContentLength()
+	if isDirectoryMarker(size, metadata, o.remote) {
+		return fs.ErrorNotAFile
+	}
+	// NOTE - Client library always returns MD5 as base64 decoded string, Object needs to maintain
+	// this as base64 encoded string.
 	o.md5 = base64.StdEncoding.EncodeToString(info.ContentMD5())
 	o.mimeType = info.ContentType()
-	o.size = info.ContentLength()
+	o.size = size
 	o.modTime = time.Time(info.LastModified())
 	o.accessTier = azblob.AccessTierType(info.AccessTier())
-	o.setMetadata(info.NewMetadata())
+	o.setMetadata(metadata)
 
 	return nil
 }
 
 func (o *Object) decodeMetaDataFromBlob(info *azblob.BlobItem) (err error) {
-	o.md5 = string(info.Properties.ContentMD5)
+	metadata := info.Metadata
+	size := *info.Properties.ContentLength
+	if isDirectoryMarker(size, metadata, o.remote) {
+		return fs.ErrorNotAFile
+	}
+	// NOTE - Client library always returns MD5 as base64 decoded string, Object needs to maintain
+	// this as base64 encoded string.
+	o.md5 = base64.StdEncoding.EncodeToString(info.Properties.ContentMD5)
 	o.mimeType = *info.Properties.ContentType
-	o.size = *info.Properties.ContentLength
+	o.size = size
 	o.modTime = info.Properties.LastModified
 	o.accessTier = info.Properties.AccessTier
-	o.setMetadata(info.Metadata)
+	o.setMetadata(metadata)
 	return nil
 }
 
@@ -1068,7 +1232,7 @@ func (o *Object) uploadMultipart(in io.Reader, size int64, blob *azblob.BlobURL,
 	var (
 		rawID   uint64
 		blockID = "" // id in base64 encoded form
-		blocks  = make([]string, totalParts)
+		blocks  []string
 	)
 
 	// increment the blockID
@@ -1125,11 +1289,14 @@ outer:
 			defer o.fs.uploadToken.Put()
 			fs.Debugf(o, "Uploading part %d/%d offset %v/%v part size %v", part+1, totalParts, fs.SizeSuffix(position), fs.SizeSuffix(size), fs.SizeSuffix(chunkSize))
 
+			// Upload the block, with MD5 for check
+			md5sum := md5.Sum(buf)
+			transactionalMD5 := md5sum[:]
 			err = o.fs.pacer.Call(func() (bool, error) {
 				bufferReader := bytes.NewReader(buf)
 				wrappedReader := wrap(bufferReader)
 				rs := readSeeker{wrappedReader, bufferReader}
-				_, err = blockBlobURL.StageBlock(ctx, blockID, rs, ac)
+				_, err = blockBlobURL.StageBlock(ctx, blockID, &rs, ac, transactionalMD5)
 				return o.fs.shouldRetry(err)
 			})
 
@@ -1206,11 +1373,20 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 		Metadata:        o.meta,
 		BlobHTTPHeaders: httpHeaders,
 	}
+	// FIXME Until https://github.com/Azure/azure-storage-blob-go/pull/75
+	// is merged the SDK can't upload a single blob of exactly the chunk
+	// size, so upload with a multpart upload to work around.
+	// See: https://github.com/ncw/rclone/issues/2653
+	multipartUpload := size >= int64(o.fs.opt.UploadCutoff)
+	if size == int64(o.fs.opt.ChunkSize) {
+		multipartUpload = true
+		fs.Debugf(o, "Setting multipart upload for file of chunk size (%d) to work around SDK bug", size)
+	}
 
 	ctx := context.Background()
 	// Don't retry, return a retry error instead
 	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
-		if size >= int64(o.fs.opt.UploadCutoff) {
+		if multipartUpload {
 			// If a large file upload in chunks
 			err = o.uploadMultipart(in, size, &blob, &httpHeaders)
 		} else {
@@ -1236,16 +1412,7 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 	}
 
 	// Now, set blob tier based on configured access tier
-	desiredAccessTier := azblob.AccessTierType(o.fs.opt.AccessTier)
-	err = o.fs.pacer.Call(func() (bool, error) {
-		_, err := blob.SetTier(ctx, desiredAccessTier)
-		return o.fs.shouldRetry(err)
-	})
-
-	if err != nil {
-		return errors.Wrap(err, "Failed to set Blob Tier")
-	}
-	return nil
+	return o.SetTier(o.fs.opt.AccessTier)
 }
 
 // Remove an object
@@ -1268,6 +1435,41 @@ func (o *Object) MimeType() string {
 // AccessTier of an object, default is of type none
 func (o *Object) AccessTier() azblob.AccessTierType {
 	return o.accessTier
+}
+
+// SetTier performs changing object tier
+func (o *Object) SetTier(tier string) error {
+	if !validateAccessTier(tier) {
+		return errors.Errorf("Tier %s not supported by Azure Blob Storage", tier)
+	}
+
+	// Check if current tier already matches with desired tier
+	if o.GetTier() == tier {
+		return nil
+	}
+	desiredAccessTier := azblob.AccessTierType(tier)
+	blob := o.getBlobReference()
+	ctx := context.Background()
+	err := o.fs.pacer.Call(func() (bool, error) {
+		_, err := blob.SetTier(ctx, desiredAccessTier, azblob.LeaseAccessConditions{})
+		return o.fs.shouldRetry(err)
+	})
+
+	if err != nil {
+		return errors.Wrap(err, "Failed to set Blob Tier")
+	}
+
+	// Set access tier on local object also, this typically
+	// gets updated on get blob properties
+	o.accessTier = desiredAccessTier
+	fs.Debugf(o, "Successfully changed object tier to %s", tier)
+
+	return nil
+}
+
+// GetTier returns object tier in azure as string
+func (o *Object) GetTier() string {
+	return string(o.accessTier)
 }
 
 // Check the interfaces are satisfied

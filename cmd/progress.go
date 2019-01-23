@@ -25,8 +25,13 @@ const (
 
 // startProgress starts the progress bar printing
 //
-// It returns a channel which should be closed to stop the stats.
-func startProgress() chan struct{} {
+// It returns a func which should be called to stop the stats.
+func startProgress() func() {
+	err := initTerminal()
+	if err != nil {
+		fs.Errorf(nil, "Failed to start progress: %v", err)
+		return func() {}
+	}
 	stopStats := make(chan struct{})
 	oldLogPrint := fs.LogPrint
 	if !log.Redirected() {
@@ -36,9 +41,12 @@ func startProgress() chan struct{} {
 
 		}
 	}
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		progressInterval := defaultProgressInterval
-		if ShowStats() {
+		if ShowStats() && *statsInterval > 0 {
 			progressInterval = *statsInterval
 		}
 		ticker := time.NewTicker(progressInterval)
@@ -48,13 +56,17 @@ func startProgress() chan struct{} {
 				printProgress("")
 			case <-stopStats:
 				ticker.Stop()
+				printProgress("")
 				fs.LogPrint = oldLogPrint
 				fmt.Println("")
 				return
 			}
 		}
 	}()
-	return stopStats
+	return func() {
+		close(stopStats)
+		wg.Wait()
+	}
 }
 
 // VT100 codes

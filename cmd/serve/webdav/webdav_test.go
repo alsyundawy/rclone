@@ -3,7 +3,7 @@
 //
 // We skip tests on platforms with troublesome character mappings
 
-//+build !windows,!darwin
+//+build !windows,!darwin,go1.9
 
 package webdav
 
@@ -48,8 +48,11 @@ func TestWebDav(t *testing.T) {
 
 	// Start the server
 	w := newWebDAV(fremote, &opt)
-	go w.serve()
-	defer w.srv.Close()
+	assert.NoError(t, w.serve())
+	defer func() {
+		w.Close()
+		w.Wait()
+	}()
 
 	// Change directory to run the tests
 	err = os.Chdir("../../../backend/webdav")

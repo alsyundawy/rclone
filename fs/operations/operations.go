@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"path"
 	"sort"
 	"strconv"
@@ -103,6 +104,8 @@ func sizeDiffers(src, dst fs.ObjectInfo) bool {
 	return src.Size() != dst.Size()
 }
 
+var checksumWarning sync.Once
+
 func equal(src fs.ObjectInfo, dst fs.Object, sizeOnly, checkSum bool) bool {
 	if sizeDiffers(src, dst) {
 		fs.Debugf(src, "Sizes differ (src %d vs dst %d)", src.Size(), dst.Size())
@@ -124,6 +127,9 @@ func equal(src fs.ObjectInfo, dst fs.Object, sizeOnly, checkSum bool) bool {
 			return false
 		}
 		if ht == hash.None {
+			checksumWarning.Do(func() {
+				fs.Logf(dst.Fs(), "--checksum is in use but the source and destination have no hashes in common; falling back to --size-only")
+			})
 			fs.Debugf(src, "Size of src and dst objects identical")
 		} else {
 			fs.Debugf(src, "Size and %v of src and dst objects identical", ht)
@@ -359,6 +365,11 @@ func Copy(f fs.Fs, dst fs.Object, remote string, src fs.Object) (newDst fs.Objec
 // Move src object to dst or fdst if nil.  If dst is nil then it uses
 // remote as the name of the new object.
 //
+// Note that you must check the destination does not exist before
+// calling this and pass it as dst.  If you pass dst=nil and the
+// destination does exist then this may create duplicates or return
+// errors.
+//
 // It returns the destination object if possible.  Note that this may
 // be nil.
 func Move(fdst fs.Fs, dst fs.Object, remote string, src fs.Object) (newDst fs.Object, err error) {
@@ -566,6 +577,7 @@ type checkMarch struct {
 	noHashes        int32
 	srcFilesMissing int32
 	dstFilesMissing int32
+	matches         int32
 }
 
 // DstOnly have an object which is in the destination only
@@ -633,6 +645,7 @@ func (c *checkMarch) Match(dst, src fs.DirEntry) (recurse bool) {
 			if differ {
 				atomic.AddInt32(&c.differences, 1)
 			} else {
+				atomic.AddInt32(&c.matches, 1)
 				fs.Debugf(dstX, "OK")
 			}
 			if noHash {
@@ -679,7 +692,13 @@ func CheckFn(fdst, fsrc fs.Fs, check checkFn, oneway bool) error {
 	}
 
 	// set up a march over fdst and fsrc
-	m := march.New(context.Background(), fdst, fsrc, "", c)
+	m := &march.March{
+		Ctx:      context.Background(),
+		Fdst:     fdst,
+		Fsrc:     fsrc,
+		Dir:      "",
+		Callback: c,
+	}
 	fs.Infof(fdst, "Waiting for checks to finish")
 	m.Run()
 
@@ -693,6 +712,9 @@ func CheckFn(fdst, fsrc fs.Fs, check checkFn, oneway bool) error {
 	fs.Logf(fdst, "%d differences found", accounting.Stats.GetErrors())
 	if c.noHashes > 0 {
 		fs.Logf(fdst, "%d hashes could not be checked", c.noHashes)
+	}
+	if c.matches > 0 {
+		fs.Logf(fdst, "%d matching files", c.matches)
 	}
 	if c.differences > 0 {
 		return errors.Errorf("%d differences found", c.differences)
@@ -970,7 +992,7 @@ func Purge(f fs.Fs, dir string) error {
 		if err != nil {
 			return err
 		}
-		err = Rmdirs(f, "", false)
+		err = Rmdirs(f, dir, false)
 	}
 	if err != nil {
 		fs.CountError(err)
@@ -1201,7 +1223,7 @@ func PublicLink(f fs.Fs, remote string) (string, error) {
 // containing empty directories) under f, including f.
 func Rmdirs(f fs.Fs, dir string, leaveRoot bool) error {
 	dirEmpty := make(map[string]bool)
-	dirEmpty[""] = !leaveRoot
+	dirEmpty[dir] = !leaveRoot
 	err := walk.Walk(f, dir, true, fs.Config.MaxDepth, func(dirPath string, entries fs.DirEntries, err error) error {
 		if err != nil {
 			fs.CountError(err)
@@ -1325,6 +1347,14 @@ func RcatSize(fdst fs.Fs, dstFileName string, in io.ReadCloser, size int64, modT
 		accounting.Stats.Transferring(dstFileName)
 		body := ioutil.NopCloser(in)                                 // we let the server close the body
 		in := accounting.NewAccountSizeName(body, size, dstFileName) // account the transfer (no buffering)
+
+		if fs.Config.DryRun {
+			fs.Logf("stdin", "Not uploading as --dry-run")
+			// prevents "broken pipe" errors
+			_, err = io.Copy(ioutil.Discard, in)
+			return nil, err
+		}
+
 		var err error
 		defer func() {
 			closeErr := in.Close()
@@ -1352,6 +1382,16 @@ func RcatSize(fdst fs.Fs, dstFileName string, in io.ReadCloser, size int64, modT
 	}
 
 	return obj, nil
+}
+
+// CopyURL copies the data from the url to (fdst, dstFileName)
+func CopyURL(fdst fs.Fs, dstFileName string, url string) (dst fs.Object, err error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer fs.CheckClose(resp.Body, &err)
+	return RcatSize(fdst, dstFileName, resp.Body, resp.ContentLength, time.Now())
 }
 
 // moveOrCopyFile moves or copies a single file possibly to a new name
@@ -1405,6 +1445,21 @@ func MoveFile(fdst fs.Fs, fsrc fs.Fs, dstFileName string, srcFileName string) (e
 // CopyFile moves a single file possibly to a new name
 func CopyFile(fdst fs.Fs, fsrc fs.Fs, dstFileName string, srcFileName string) (err error) {
 	return moveOrCopyFile(fdst, fsrc, dstFileName, srcFileName, true)
+}
+
+// SetTier changes tier of object in remote
+func SetTier(fsrc fs.Fs, tier string) error {
+	return ListFn(fsrc, func(o fs.Object) {
+		objImpl, ok := o.(fs.SetTierer)
+		if !ok {
+			fs.Errorf(fsrc, "Remote object does not implement SetTier")
+			return
+		}
+		err := objImpl.SetTier(tier)
+		if err != nil {
+			fs.Errorf(fsrc, "Failed to do SetTier, %v", err)
+		}
+	})
 }
 
 // ListFormat defines files information print format
