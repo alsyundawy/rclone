@@ -30,7 +30,7 @@ require (
 	github.com/kr/pretty v0.1.0 // indirect
 	github.com/mattn/go-runewidth v0.0.3 // indirect
 	github.com/ncw/go-acd v0.0.0-20171120105400-887eb06ab6a2
-	github.com/ncw/swift v1.0.43
+	github.com/ncw/swift v1.0.44
 	github.com/nsf/termbox-go v0.0.0-20181027232701-60ab7e3d12ed
 	github.com/okzk/sdnotify v0.0.0-20180710141335-d9becc38acbd
 	github.com/patrickmn/go-cache v2.1.0+incompatible
@@ -49,10 +49,10 @@ require (
 	github.com/spf13/cobra v0.0.3
 	github.com/spf13/pflag v1.0.3
 	github.com/stretchr/testify v1.2.2
-	github.com/t3rm1n4l/go-mega v0.0.0-20180817194457-854bf31d998b
+	github.com/t3rm1n4l/go-mega v0.0.0-20190205172012-55a226cf41da
 	github.com/xanzy/ssh-agent v0.2.0
 	github.com/yunify/qingstor-sdk-go v2.2.15+incompatible
-	golang.org/x/crypto v0.0.0-20181112202954-3d3f9f413869
+	golang.org/x/crypto v0.0.0-20190131182504-b8fe1690c613
 	golang.org/x/net v0.0.0-20181114220301-adae6a3d119a
 	golang.org/x/oauth2 v0.0.0-20181120190819-8f65e3013eba
 	golang.org/x/sync v0.0.0-20181108010431-42b317875d0f

@@ -77,7 +77,7 @@ func init() {
 		}, {
 			Name:     "upload_cutoff",
 			Help:     "Cutoff for switching to chunked upload (<= 256MB).",
-			Default:  fs.SizeSuffix(defaultUploadCutoff),
+			Default:  defaultUploadCutoff,
 			Advanced: true,
 		}, {
 			Name: "chunk_size",
@@ -85,7 +85,7 @@ func init() {
 
 Note that this is stored in memory and there may be up to
 "--transfers" chunks stored at once in memory.`,
-			Default:  fs.SizeSuffix(defaultChunkSize),
+			Default:  defaultChunkSize,
 			Advanced: true,
 		}, {
 			Name: "list_chunk",
@@ -307,7 +307,7 @@ func (f *Fs) newPipeline(c azblob.Credential, o azblob.PipelineOptions) pipeline
 	return pipeline.NewPipeline(factories, pipeline.Options{HTTPSender: httpClientFactory(f.client), Log: o.Log})
 }
 
-// NewFs contstructs an Fs from the path, container:path
+// NewFs constructs an Fs from the path, container:path
 func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	// Parse config into Options struct
 	opt := new(Options)
@@ -392,7 +392,6 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 				return nil, errors.New("Container name in SAS URL and container provided in command do not match")
 			}
 
-			container = parts.ContainerName
 			containerURL = azblob.NewContainerURL(*u, pipeline)
 		} else {
 			serviceURL = azblob.NewServiceURL(*u, pipeline)
@@ -754,12 +753,50 @@ func (f *Fs) Put(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.
 	return fs, fs.Update(in, src, options...)
 }
 
+// Check if the container exists
+//
+// NB this can return incorrect results if called immediately after container deletion
+func (f *Fs) dirExists() (bool, error) {
+	options := azblob.ListBlobsSegmentOptions{
+		Details: azblob.BlobListingDetails{
+			Copy:             false,
+			Metadata:         false,
+			Snapshots:        false,
+			UncommittedBlobs: false,
+			Deleted:          false,
+		},
+		MaxResults: 1,
+	}
+	err := f.pacer.Call(func() (bool, error) {
+		ctx := context.Background()
+		_, err := f.cntURL.ListBlobsHierarchySegment(ctx, azblob.Marker{}, "", options)
+		return f.shouldRetry(err)
+	})
+	if err == nil {
+		return true, nil
+	}
+	// Check http error code along with service code, current SDK doesn't populate service code correctly sometimes
+	if storageErr, ok := err.(azblob.StorageError); ok && (storageErr.ServiceCode() == azblob.ServiceCodeContainerNotFound || storageErr.Response().StatusCode == http.StatusNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+
 // Mkdir creates the container if it doesn't exist
 func (f *Fs) Mkdir(dir string) error {
 	f.containerOKMu.Lock()
 	defer f.containerOKMu.Unlock()
 	if f.containerOK {
 		return nil
+	}
+	if !f.containerDeleted {
+		exists, err := f.dirExists()
+		if err == nil {
+			f.containerOK = exists
+		}
+		if err != nil || exists {
+			return err
+		}
 	}
 
 	// now try to create the container
@@ -1000,7 +1037,7 @@ func (o *Object) decodeMetaDataFromPropertiesResponse(info *azblob.BlobGetProper
 	o.md5 = base64.StdEncoding.EncodeToString(info.ContentMD5())
 	o.mimeType = info.ContentType()
 	o.size = size
-	o.modTime = time.Time(info.LastModified())
+	o.modTime = info.LastModified()
 	o.accessTier = azblob.AccessTierType(info.AccessTier())
 	o.setMetadata(metadata)
 
@@ -1064,12 +1101,6 @@ func (o *Object) readMetaData() (err error) {
 	}
 
 	return o.decodeMetaDataFromPropertiesResponse(blobProperties)
-}
-
-// timeString returns modTime as the number of milliseconds
-// elapsed since January 1, 1970 UTC as a decimal string.
-func timeString(modTime time.Time) string {
-	return strconv.FormatInt(modTime.UnixNano()/1E6, 10)
 }
 
 // parseTimeString converts a decimal string number of milliseconds

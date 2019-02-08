@@ -227,7 +227,7 @@ that the chunks will be buffered into memory.`,
 			Advanced: true,
 		}, {
 			Name:     "drive_type",
-			Help:     "The type of the drive ( personal | business | documentLibrary )",
+			Help:     "The type of the drive ( " + driveTypePersonal + " | " + driveTypeBusiness + " | " + driveTypeSharepoint + " )",
 			Default:  "",
 			Advanced: true,
 		}, {
@@ -324,13 +324,13 @@ var retryErrorCodes = []int{
 // shouldRetry returns a boolean as to whether this resp and err
 // deserve to be retried.  It returns the err as a convenience
 func shouldRetry(resp *http.Response, err error) (bool, error) {
-	authRety := false
+	authRetry := false
 
 	if resp != nil && resp.StatusCode == 401 && len(resp.Header["Www-Authenticate"]) == 1 && strings.Index(resp.Header["Www-Authenticate"][0], "expired_token") >= 0 {
-		authRety = true
+		authRetry = true
 		fs.Debugf(nil, "Should retry: %v", err)
 	}
-	return authRety || fserrors.ShouldRetry(err) || fserrors.ShouldRetryHTTP(resp, retryErrorCodes), err
+	return authRetry || fserrors.ShouldRetry(err) || fserrors.ShouldRetryHTTP(resp, retryErrorCodes), err
 }
 
 // readMetaDataForPathRelativeToID reads the metadata for a path relative to an item that is addressed by its normalized ID.
@@ -492,11 +492,11 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 
 	// Get rootID
 	rootInfo, _, err := f.readMetaDataForPath("")
-	if err != nil || rootInfo.ID == "" {
+	if err != nil || rootInfo.GetID() == "" {
 		return nil, errors.Wrap(err, "failed to get root")
 	}
 
-	f.dirCache = dircache.New(root, rootInfo.ID, f)
+	f.dirCache = dircache.New(root, rootInfo.GetID(), f)
 
 	// Find the current root
 	err = f.dirCache.FindRoot(false)
@@ -1560,10 +1560,6 @@ func (o *Object) uploadSinglepart(in io.Reader, size int64, modTime time.Time) (
 		}
 	}
 
-	if size == 0 {
-		opts.Body = nil
-	}
-
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = o.fs.srv.CallJSON(&opts, nil, &info)
 		if apiErr, ok := err.(*api.Error); ok {
@@ -1606,7 +1602,7 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 	} else if size == 0 {
 		info, err = o.uploadSinglepart(in, size, modTime)
 	} else {
-		panic("src file size must be >= 0")
+		return errors.New("unknown-sized upload not supported")
 	}
 	if err != nil {
 		return err

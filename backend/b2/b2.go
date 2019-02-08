@@ -108,7 +108,7 @@ in the [b2 integrations checklist](https://www.backblaze.com/b2/docs/integration
 Files above this size will be uploaded in chunks of "--b2-chunk-size".
 
 This value should be set no larger than 4.657GiB (== 5GB).`,
-			Default:  fs.SizeSuffix(defaultUploadCutoff),
+			Default:  defaultUploadCutoff,
 			Advanced: true,
 		}, {
 			Name: "chunk_size",
@@ -117,8 +117,13 @@ This value should be set no larger than 4.657GiB (== 5GB).`,
 When uploading large files, chunk the file into this size.  Note that
 these chunks are buffered in memory and there might a maximum of
 "--transfers" chunks in progress at once.  5,000,000 Bytes is the
-minimim size.`,
-			Default:  fs.SizeSuffix(defaultChunkSize),
+minimum size.`,
+			Default:  defaultChunkSize,
+			Advanced: true,
+		}, {
+			Name:     "disable_checksum",
+			Help:     `Disable checksums for large (> upload cutoff) files`,
+			Default:  false,
 			Advanced: true,
 		}},
 	})
@@ -126,14 +131,15 @@ minimim size.`,
 
 // Options defines the configuration for this backend
 type Options struct {
-	Account      string        `config:"account"`
-	Key          string        `config:"key"`
-	Endpoint     string        `config:"endpoint"`
-	TestMode     string        `config:"test_mode"`
-	Versions     bool          `config:"versions"`
-	HardDelete   bool          `config:"hard_delete"`
-	UploadCutoff fs.SizeSuffix `config:"upload_cutoff"`
-	ChunkSize    fs.SizeSuffix `config:"chunk_size"`
+	Account         string        `config:"account"`
+	Key             string        `config:"key"`
+	Endpoint        string        `config:"endpoint"`
+	TestMode        string        `config:"test_mode"`
+	Versions        bool          `config:"versions"`
+	HardDelete      bool          `config:"hard_delete"`
+	UploadCutoff    fs.SizeSuffix `config:"upload_cutoff"`
+	ChunkSize       fs.SizeSuffix `config:"chunk_size"`
+	DisableCheckSum bool          `config:"disable_checksum"`
 }
 
 // Fs represents a remote b2 server
@@ -313,7 +319,7 @@ func (f *Fs) setUploadCutoff(cs fs.SizeSuffix) (old fs.SizeSuffix, err error) {
 	return
 }
 
-// NewFs contstructs an Fs from the path, bucket:path
+// NewFs constructs an Fs from the path, bucket:path
 func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	// Parse config into Options struct
 	opt := new(Options)
@@ -1453,7 +1459,7 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 	// Content-Type b2/x-auto to automatically set the stored Content-Type
 	// post upload. In the case where a file extension is absent or the
 	// lookup fails, the Content-Type is set to application/octet-stream. The
-	// Content-Type mappings can be purused here.
+	// Content-Type mappings can be pursued here.
 	//
 	// X-Bz-Content-Sha1
 	// required
@@ -1499,11 +1505,6 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 			timeHeader:       timeString(modTime),
 		},
 		ContentLength: &size,
-	}
-	// for go1.8 (see release notes) we must nil the Body if we want a
-	// "Content-Length: 0" header which b2 requires for all files.
-	if size == 0 {
-		opts.Body = nil
 	}
 	var response api.FileInfo
 	// Don't retry, return a retry error instead
