@@ -290,14 +290,17 @@ func (d *Dir) _readDirFromEntries(entries fs.DirEntries, dirTree walk.DirTree, w
 // readDirTree forces a refresh of the complete directory tree
 func (d *Dir) readDirTree() error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	f, path := d.f, d.path
+	d.mu.Unlock()
 	when := time.Now()
-	d.read = time.Time{}
-	fs.Debugf(d.path, "Reading directory tree")
-	dt, err := walk.NewDirTree(d.f, d.path, false, -1)
+	fs.Debugf(path, "Reading directory tree")
+	dt, err := walk.NewDirTree(f, path, false, -1)
 	if err != nil {
 		return err
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.read = time.Time{}
 	err = d._readDirFromDirTree(dt, when)
 	if err != nil {
 		return err
@@ -458,8 +461,23 @@ func (d *Dir) Mkdir(name string) (*Dir, error) {
 		return nil, EROFS
 	}
 	path := path.Join(d.path, name)
+	node, err := d.stat(name)
+	switch err {
+	case ENOENT:
+		// not found, carry on
+	case nil:
+		// found so check what it is
+		if node.IsDir() {
+			return node.(*Dir), err
+		}
+		return nil, EEXIST
+	default:
+		// a different error - report
+		fs.Errorf(d, "Dir.Mkdir failed to read directory: %v", err)
+		return nil, err
+	}
 	// fs.Debugf(path, "Dir.Mkdir")
-	err := d.f.Mkdir(path)
+	err = d.f.Mkdir(path)
 	if err != nil {
 		fs.Errorf(d, "Dir.Mkdir failed to create directory: %v", err)
 		return nil, err
@@ -600,7 +618,7 @@ func (d *Dir) Rename(oldName, newName string, destDir *Dir) error {
 		}
 	default:
 		err = errors.Errorf("unknown type %T", oldNode)
-		fs.Errorf(d.path, "Dir.ReadDirAll error: %v", err)
+		fs.Errorf(d.path, "Dir.Rename error: %v", err)
 		return err
 	}
 

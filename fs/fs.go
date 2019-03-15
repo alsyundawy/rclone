@@ -16,8 +16,10 @@ import (
 
 	"github.com/ncw/rclone/fs/config/configmap"
 	"github.com/ncw/rclone/fs/config/configstruct"
+	"github.com/ncw/rclone/fs/fserrors"
 	"github.com/ncw/rclone/fs/fspath"
 	"github.com/ncw/rclone/fs/hash"
+	"github.com/ncw/rclone/lib/pacer"
 	"github.com/pkg/errors"
 )
 
@@ -59,7 +61,7 @@ var (
 	ErrorNotAFile                    = errors.New("is a not a regular file")
 	ErrorNotDeleting                 = errors.New("not deleting files as there were IO errors")
 	ErrorNotDeletingDirs             = errors.New("not deleting directories as there were IO errors")
-	ErrorCantMoveOverlapping         = errors.New("can't move files on overlapping remotes")
+	ErrorOverlapping                 = errors.New("can't sync or move files on overlapping remotes")
 	ErrorDirectoryNotEmpty           = errors.New("directory not empty")
 	ErrorImmutableModified           = errors.New("immutable file modified")
 	ErrorPermissionDenied            = errors.New("permission denied")
@@ -407,6 +409,7 @@ type Features struct {
 	BucketBased             bool // is bucket based (like s3, swift etc)
 	SetTier                 bool // allows set tier functionality on objects
 	GetTier                 bool // allows to retrieve storage tier of objects
+	ServerSideAcrossConfigs bool // can server side copy between different remotes of the same type
 
 	// Purge all files in the root and the root directory
 	//
@@ -1111,4 +1114,82 @@ func GetModifyWindow(fss ...Info) time.Duration {
 		}
 	}
 	return window
+}
+
+// Pacer is a simple wrapper around a pacer.Pacer with logging.
+type Pacer struct {
+	*pacer.Pacer
+}
+
+type logCalculator struct {
+	pacer.Calculator
+}
+
+// NewPacer creates a Pacer for the given Fs and Calculator.
+func NewPacer(c pacer.Calculator) *Pacer {
+	p := &Pacer{
+		Pacer: pacer.New(
+			pacer.InvokerOption(pacerInvoker),
+			pacer.MaxConnectionsOption(Config.Checkers+Config.Transfers),
+			pacer.RetriesOption(Config.LowLevelRetries),
+			pacer.CalculatorOption(c),
+		),
+	}
+	p.SetCalculator(c)
+	return p
+}
+
+func (d *logCalculator) Calculate(state pacer.State) time.Duration {
+	oldSleepTime := state.SleepTime
+	newSleepTime := d.Calculator.Calculate(state)
+	if state.ConsecutiveRetries > 0 {
+		if newSleepTime != oldSleepTime {
+			Debugf("pacer", "Rate limited, increasing sleep to %v", newSleepTime)
+		}
+	} else {
+		if newSleepTime != oldSleepTime {
+			Debugf("pacer", "Reducing sleep to %v", newSleepTime)
+		}
+	}
+	return newSleepTime
+}
+
+// SetCalculator sets the pacing algorithm. Don't modify the Calculator object
+// afterwards, use the ModifyCalculator method when needed.
+//
+// It will choose the default algorithm if nil is passed in.
+func (p *Pacer) SetCalculator(c pacer.Calculator) {
+	switch c.(type) {
+	case *logCalculator:
+		Logf("pacer", "Invalid Calculator in fs.Pacer.SetCalculator")
+	case nil:
+		c = &logCalculator{pacer.NewDefault()}
+	default:
+		c = &logCalculator{c}
+	}
+
+	p.Pacer.SetCalculator(c)
+}
+
+// ModifyCalculator calls the given function with the currently configured
+// Calculator and the Pacer lock held.
+func (p *Pacer) ModifyCalculator(f func(pacer.Calculator)) {
+	p.ModifyCalculator(func(c pacer.Calculator) {
+		switch _c := c.(type) {
+		case *logCalculator:
+			f(_c.Calculator)
+		default:
+			Logf("pacer", "Invalid Calculator in fs.Pacer: %t", c)
+			f(c)
+		}
+	})
+}
+
+func pacerInvoker(try, retries int, f pacer.Paced) (retry bool, err error) {
+	retry, err = f()
+	if retry {
+		Debugf("pacer", "low level retry %d/%d (error %v)", try, retries, err)
+		err = fserrors.RetryError(err)
+	}
+	return
 }

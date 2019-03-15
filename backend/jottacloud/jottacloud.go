@@ -190,7 +190,7 @@ type Fs struct {
 	endpointURL  string
 	srv          *rest.Client
 	apiSrv       *rest.Client
-	pacer        *pacer.Pacer
+	pacer        *fs.Pacer
 	tokenRenewer *oauthutil.Renew // renew the token on expiry
 }
 
@@ -381,6 +381,9 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	rootIsDir := strings.HasSuffix(root, "/")
 	root = parsePath(root)
 
+	// add jottacloud to the long list of sites that don't follow the oauth spec correctly
+	oauth2.RegisterBrokenAuthHeaderProvider("https://www.jottacloud.com/")
+
 	// the oauth client for the api servers needs
 	// a filter to fix the grant_type issues (see above)
 	baseClient := fshttp.NewClient(fs.Config)
@@ -403,7 +406,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		opt:    *opt,
 		srv:    rest.NewClient(oAuthClient).SetRoot(rootURL),
 		apiSrv: rest.NewClient(oAuthClient).SetRoot(apiURL),
-		pacer:  pacer.New().SetMinSleep(minSleep).SetMaxSleep(maxSleep).SetDecayConstant(decayConstant),
+		pacer:  fs.NewPacer(pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,

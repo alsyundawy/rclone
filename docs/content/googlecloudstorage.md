@@ -217,6 +217,20 @@ the rclone config file, you can set `service_account_credentials` with
 the actual contents of the file instead, or set the equivalent
 environment variable.
 
+### Application Default Credentials ###
+
+If no other source of credentials is provided, rclone will fall back
+to
+[Application Default Credentials](https://cloud.google.com/video-intelligence/docs/common/auth#authenticating_with_application_default_credentials)
+this is useful both when you already have configured authentication
+for your developer account, or in production when running on a google
+compute host. Note that if running in docker, you may need to run
+additional commands on your google compute machine -
+[see this page](https://cloud.google.com/container-registry/docs/advanced-authentication#gcloud_as_a_docker_credential_helper).
+
+Note that in the case application default credentials are used, there
+is no need to explicitly configure a project number.
+
 ### --fast-list ###
 
 This remote supports `--fast-list` which allows you to use fewer
@@ -328,6 +342,27 @@ Access Control List for new buckets.
     - "publicReadWrite"
         - Project team owners get OWNER access, and all Users get WRITER access.
 
+#### --gcs-bucket-policy-only
+
+Access checks should use bucket-level IAM policies.
+
+If you want to upload objects to a bucket with Bucket Policy Only set
+then you will need to set this.
+
+When it is set, rclone:
+
+- ignores ACLs set on buckets
+- ignores ACLs set on objects
+- creates buckets with Bucket Policy Only set
+
+Docs: https://cloud.google.com/storage/docs/bucket-policy-only
+
+
+- Config:      bucket_policy_only
+- Env Var:     RCLONE_GCS_BUCKET_POLICY_ONLY
+- Type:        bool
+- Default:     false
+
 #### --gcs-location
 
 Location for the newly created buckets.
@@ -347,16 +382,26 @@ Location for the newly created buckets.
         - Multi-regional location for United States.
     - "asia-east1"
         - Taiwan.
+    - "asia-east2"
+        - Hong Kong.
     - "asia-northeast1"
         - Tokyo.
+    - "asia-south1"
+        - Mumbai.
     - "asia-southeast1"
         - Singapore.
     - "australia-southeast1"
         - Sydney.
+    - "europe-north1"
+        - Finland.
     - "europe-west1"
         - Belgium.
     - "europe-west2"
         - London.
+    - "europe-west3"
+        - Frankfurt.
+    - "europe-west4"
+        - Netherlands.
     - "us-central1"
         - Iowa.
     - "us-east1"
@@ -365,6 +410,8 @@ Location for the newly created buckets.
         - Northern Virginia.
     - "us-west1"
         - Oregon.
+    - "us-west2"
+        - California.
 
 #### --gcs-storage-class
 

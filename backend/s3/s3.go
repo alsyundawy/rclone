@@ -346,7 +346,7 @@ func init() {
 			Help:     "Endpoint for S3 API.\nRequired when using an S3 clone.",
 			Provider: "!AWS,IBMCOS,Alibaba",
 			Examples: []fs.OptionExample{{
-				Value:    "objects-us-west-1.dream.io",
+				Value:    "objects-us-east-1.dream.io",
 				Help:     "Dream Objects endpoint",
 				Provider: "Dreamhost",
 			}, {
@@ -782,7 +782,7 @@ type Fs struct {
 	bucketOKMu    sync.Mutex       // mutex to protect bucket OK
 	bucketOK      bool             // true if we have created the bucket
 	bucketDeleted bool             // true if we have deleted the bucket
-	pacer         *pacer.Pacer     // To pace the API calls
+	pacer         *fs.Pacer        // To pace the API calls
 	srv           *http.Client     // a plain http client
 }
 
@@ -1055,7 +1055,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		c:      c,
 		bucket: bucket,
 		ses:    ses,
-		pacer:  pacer.New().SetMinSleep(minSleep).SetPacer(pacer.S3Pacer),
+		pacer:  fs.NewPacer(pacer.NewS3(pacer.MinSleep(minSleep))),
 		srv:    fshttp.NewClient(fs.Config),
 	}
 	f.features = (&fs.Features{

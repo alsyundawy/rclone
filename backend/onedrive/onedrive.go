@@ -261,7 +261,7 @@ type Fs struct {
 	features     *fs.Features       // optional features
 	srv          *rest.Client       // the connection to the one drive server
 	dirCache     *dircache.DirCache // Map of directory path to directory id
-	pacer        *pacer.Pacer       // pacer for API calls
+	pacer        *fs.Pacer          // pacer for API calls
 	tokenRenewer *oauthutil.Renew   // renew the token on expiry
 	driveID      string             // ID to use for querying Microsoft Graph
 	driveType    string             // https://developer.microsoft.com/en-us/graph/docs/api-reference/v1.0/resources/drive
@@ -335,8 +335,13 @@ func shouldRetry(resp *http.Response, err error) (bool, error) {
 
 // readMetaDataForPathRelativeToID reads the metadata for a path relative to an item that is addressed by its normalized ID.
 // if `relPath` == "", it reads the metadata for the item with that ID.
+//
+// We address items using the pattern `drives/driveID/items/itemID:/relativePath`
+// instead of simply using `drives/driveID/root:/itemPath` because it works for
+// "shared with me" folders in OneDrive Personal (See #2536, #2778)
+// This path pattern comes from https://github.com/OneDrive/onedrive-api-docs/issues/908#issuecomment-417488480
 func (f *Fs) readMetaDataForPathRelativeToID(normalizedID string, relPath string) (info *api.Item, resp *http.Response, err error) {
-	opts := newOptsCall(normalizedID, "GET", ":/"+rest.URLPathEscape(replaceReservedChars(relPath)))
+	opts := newOptsCall(normalizedID, "GET", ":/"+withTrailingColon(rest.URLPathEscape(replaceReservedChars(relPath))))
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallJSON(&opts, nil, &info)
 		return shouldRetry(resp, err)
@@ -475,7 +480,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		driveID:   opt.DriveID,
 		driveType: opt.DriveType,
 		srv:       rest.NewClient(oAuthClient).SetRoot(graphURL + "/drives/" + opt.DriveID),
-		pacer:     pacer.New().SetMinSleep(minSleep).SetMaxSleep(maxSleep).SetDecayConstant(decayConstant),
+		pacer:     fs.NewPacer(pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,
@@ -1340,12 +1345,12 @@ func (o *Object) setModTime(modTime time.Time) (*api.Item, error) {
 		opts = rest.Opts{
 			Method:  "PATCH",
 			RootURL: rootURL,
-			Path:    "/" + drive + "/items/" + trueDirID + ":/" + rest.URLPathEscape(leaf),
+			Path:    "/" + drive + "/items/" + trueDirID + ":/" + withTrailingColon(rest.URLPathEscape(leaf)),
 		}
 	} else {
 		opts = rest.Opts{
 			Method: "PATCH",
-			Path:   "/root:/" + rest.URLPathEscape(o.srvPath()),
+			Path:   "/root:/" + withTrailingColon(rest.URLPathEscape(o.srvPath())),
 		}
 	}
 	update := api.SetFileSystemInfo{
@@ -1488,7 +1493,7 @@ func (o *Object) cancelUploadSession(url string) (err error) {
 // uploadMultipart uploads a file using multipart upload
 func (o *Object) uploadMultipart(in io.Reader, size int64, modTime time.Time) (info *api.Item, err error) {
 	if size <= 0 {
-		panic("size passed into uploadMultipart must be > 0")
+		return nil, errors.New("unknown-sized upload not supported")
 	}
 
 	// Create upload session
@@ -1535,7 +1540,7 @@ func (o *Object) uploadMultipart(in io.Reader, size int64, modTime time.Time) (i
 // This function will set modtime after uploading, which will create a new version for the remote file
 func (o *Object) uploadSinglepart(in io.Reader, size int64, modTime time.Time) (info *api.Item, err error) {
 	if size < 0 || size > int64(fs.SizeSuffix(4*1024*1024)) {
-		panic("size passed into uploadSinglepart must be >= 0 and <= 4MiB")
+		return nil, errors.New("size passed into uploadSinglepart must be >= 0 and <= 4MiB")
 	}
 
 	fs.Debugf(o, "Starting singlepart upload")
@@ -1666,6 +1671,21 @@ func getRelativePathInsideBase(base, target string) (string, bool) {
 		return target[len(baseSlash):], true
 	}
 	return "", false
+}
+
+// Adds a ":" at the end of `remotePath` in a proper manner.
+// If `remotePath` already ends with "/", change it to ":/"
+// If `remotePath` is "", return "".
+// A workaround for #2720 and #3039
+func withTrailingColon(remotePath string) string {
+	if remotePath == "" {
+		return ""
+	}
+
+	if strings.HasSuffix(remotePath, "/") {
+		return remotePath[:len(remotePath)-1] + ":/"
+	}
+	return remotePath + ":"
 }
 
 // Check the interfaces are satisfied

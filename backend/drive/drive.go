@@ -186,10 +186,10 @@ func init() {
 		},
 		Options: []fs.Option{{
 			Name: config.ConfigClientID,
-			Help: "Google Application Client Id\nLeave blank normally.",
+			Help: "Google Application Client Id\nSetting your own is recommended.\nSee https://rclone.org/drive/#making-your-own-client-id for how to create your own.\nIf you leave this blank, it will use an internal key which is low performance.",
 		}, {
 			Name: config.ConfigClientSecret,
-			Help: "Google Application Client Secret\nLeave blank normally.",
+			Help: "Google Application Client Secret\nSetting your own is recommended.",
 		}, {
 			Name: "scope",
 			Help: "Scope that rclone should use when requesting access from drive.",
@@ -426,7 +426,7 @@ type Fs struct {
 	client           *http.Client       // authorized client
 	rootFolderID     string             // the id of the root folder
 	dirCache         *dircache.DirCache // Map of directory path to directory id
-	pacer            *pacer.Pacer       // To pace the API calls
+	pacer            *fs.Pacer          // To pace the API calls
 	exportExtensions []string           // preferred extensions to download docs
 	importMimeTypes  []string           // MIME types to convert to docs
 	isTeamDrive      bool               // true if this is a team drive
@@ -676,28 +676,33 @@ func isPowerOfTwo(x int64) bool {
 }
 
 // add a charset parameter to all text/* MIME types
-func fixMimeType(mimeType string) string {
-	mediaType, param, err := mime.ParseMediaType(mimeType)
+func fixMimeType(mimeTypeIn string) string {
+	if mimeTypeIn == "" {
+		return ""
+	}
+	mediaType, param, err := mime.ParseMediaType(mimeTypeIn)
 	if err != nil {
-		return mimeType
+		return mimeTypeIn
 	}
-	if strings.HasPrefix(mimeType, "text/") && param["charset"] == "" {
+	mimeTypeOut := mimeTypeIn
+	if strings.HasPrefix(mediaType, "text/") && param["charset"] == "" {
 		param["charset"] = "utf-8"
-		mimeType = mime.FormatMediaType(mediaType, param)
+		mimeTypeOut = mime.FormatMediaType(mediaType, param)
 	}
-	return mimeType
+	if mimeTypeOut == "" {
+		panic(errors.Errorf("unable to fix MIME type %q", mimeTypeIn))
+	}
+	return mimeTypeOut
 }
-func fixMimeTypeMap(m map[string][]string) map[string][]string {
-	for _, v := range m {
+func fixMimeTypeMap(in map[string][]string) (out map[string][]string) {
+	out = make(map[string][]string, len(in))
+	for k, v := range in {
 		for i, mt := range v {
-			fixed := fixMimeType(mt)
-			if fixed == "" {
-				panic(errors.Errorf("unable to fix MIME type %q", mt))
-			}
-			v[i] = fixed
+			v[i] = fixMimeType(mt)
 		}
+		out[fixMimeType(k)] = v
 	}
-	return m
+	return out
 }
 func isInternalMimeType(mimeType string) bool {
 	return strings.HasPrefix(mimeType, "application/vnd.google-apps.")
@@ -789,8 +794,8 @@ func configTeamDrive(opt *Options, m configmap.Mapper, name string) error {
 }
 
 // newPacer makes a pacer configured for drive
-func newPacer(opt *Options) *pacer.Pacer {
-	return pacer.New().SetMinSleep(time.Duration(opt.PacerMinSleep)).SetBurst(opt.PacerBurst).SetPacer(pacer.GoogleDrivePacer)
+func newPacer(opt *Options) *fs.Pacer {
+	return fs.NewPacer(pacer.NewGoogleDrive(pacer.MinSleep(opt.PacerMinSleep), pacer.Burst(opt.PacerBurst)))
 }
 
 func getServiceAccountClient(opt *Options, credentialsData []byte) (*http.Client, error) {
@@ -902,6 +907,7 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 		ReadMimeType:            true,
 		WriteMimeType:           true,
 		CanHaveEmptyDirectories: true,
+		ServerSideAcrossConfigs: true,
 	}).Fill(f)
 
 	// Create a new authorized Drive client.
@@ -2430,6 +2436,10 @@ func (o *baseObject) httpResponse(url, method string, options []fs.OpenOption) (
 		return req, nil, err
 	}
 	fs.OpenOptionAddHTTPHeaders(req.Header, options)
+	if o.bytes == 0 {
+		// Don't supply range requests for 0 length objects as they always fail
+		delete(req.Header, "Range")
+	}
 	err = o.fs.pacer.Call(func() (bool, error) {
 		res, err = o.fs.client.Do(req)
 		if err == nil {

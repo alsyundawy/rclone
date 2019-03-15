@@ -235,3 +235,14 @@ Contributors
   * Wojciech Smigielski <wojciech.hieronim.smigielski@gmail.com>
   * weetmuts <oehrstroem@gmail.com>
   * Jonathan <vanillajonathan@users.noreply.github.com>
+  * James Carpenter <orbsmiv@users.noreply.github.com>
+  * Vince <vince0villamora@gmail.com>
+  * Nestar47 <47841759+Nestar47@users.noreply.github.com>
+  * Six <brbsix@gmail.com>
+  * Alexandru Bumbacea <alexandru.bumbacea@booking.com>
+  * calisro <robert.calistri@gmail.com>
+  * Dr.Rx <david.rey@nventive.com>
+  * marcintustin <marcintustin@users.noreply.github.com>
+  * jaKa Močnik <jaka@koofr.net>
+  * Fionera <fionera@fionera.de>
+  * Dan Walters <dan@walters.io>

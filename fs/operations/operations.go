@@ -10,6 +10,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -272,7 +273,7 @@ func Copy(f fs.Fs, dst fs.Object, remote string, src fs.Object) (newDst fs.Objec
 		// Try server side copy first - if has optional interface and
 		// is same underlying remote
 		actionTaken = "Copied (server side copy)"
-		if doCopy := f.Features().Copy; doCopy != nil && SameConfig(src.Fs(), f) {
+		if doCopy := f.Features().Copy; doCopy != nil && (SameConfig(src.Fs(), f) || (SameRemoteType(src.Fs(), f) && f.Features().ServerSideAcrossConfigs)) {
 			newDst, err = doCopy(src, remote)
 			if err == nil {
 				dst = newDst
@@ -283,7 +284,7 @@ func Copy(f fs.Fs, dst fs.Object, remote string, src fs.Object) (newDst fs.Objec
 		// If can't server side copy, do it manually
 		if err == fs.ErrorCantCopy {
 			var in0 io.ReadCloser
-			in0, err = src.Open(hashOption)
+			in0, err = newReOpen(src, hashOption, fs.Config.LowLevelRetries)
 			if err != nil {
 				err = errors.Wrap(err, "failed to open source object")
 			} else {
@@ -391,7 +392,7 @@ func Move(fdst fs.Fs, dst fs.Object, remote string, src fs.Object) (newDst fs.Ob
 		return newDst, nil
 	}
 	// See if we have Move available
-	if doMove := fdst.Features().Move; doMove != nil && SameConfig(src.Fs(), fdst) {
+	if doMove := fdst.Features().Move; doMove != nil && (SameConfig(src.Fs(), fdst) || (SameRemoteType(src.Fs(), fdst) && fdst.Features().ServerSideAcrossConfigs)) {
 		// Delete destination if it exists
 		if dst != nil {
 			err = DeleteFile(dst)
@@ -524,6 +525,11 @@ func DeleteFiles(toBeDeleted fs.ObjectsChan) error {
 	return DeleteFilesWithBackupDir(toBeDeleted, nil)
 }
 
+// SameRemoteType returns true if fdst and fsrc are the same type
+func SameRemoteType(fdst, fsrc fs.Info) bool {
+	return fmt.Sprintf("%T", fdst) == fmt.Sprintf("%T", fsrc)
+}
+
 // SameConfig returns true if fdst and fsrc are using the same config
 // file entry
 func SameConfig(fdst, fsrc fs.Info) bool {
@@ -532,7 +538,7 @@ func SameConfig(fdst, fsrc fs.Info) bool {
 
 // Same returns true if fdst and fsrc point to the same underlying Fs
 func Same(fdst, fsrc fs.Info) bool {
-	return SameConfig(fdst, fsrc) && fdst.Root() == fsrc.Root()
+	return SameConfig(fdst, fsrc) && strings.Trim(fdst.Root(), "/") == strings.Trim(fsrc.Root(), "/")
 }
 
 // Overlapping returns true if fdst and fsrc point to the same
@@ -543,7 +549,7 @@ func Overlapping(fdst, fsrc fs.Info) bool {
 	}
 	// Return the Root with a trailing / if not empty
 	fixedRoot := func(f fs.Info) string {
-		s := strings.Trim(f.Root(), "/")
+		s := strings.Trim(filepath.ToSlash(f.Root()), "/")
 		if s != "" {
 			s += "/"
 		}
@@ -1479,8 +1485,7 @@ type ListFormat struct {
 	separator string
 	dirSlash  bool
 	absolute  bool
-	output    []func() string
-	entry     fs.DirEntry
+	output    []func(entry *ListJSONItem) string
 	csv       *csv.Writer
 	buf       bytes.Buffer
 }
@@ -1516,76 +1521,91 @@ func (l *ListFormat) SetCSV(useCSV bool) {
 }
 
 // SetOutput sets functions used to create files information
-func (l *ListFormat) SetOutput(output []func() string) {
+func (l *ListFormat) SetOutput(output []func(entry *ListJSONItem) string) {
 	l.output = output
 }
 
 // AddModTime adds file's Mod Time to output
 func (l *ListFormat) AddModTime() {
-	l.AppendOutput(func() string { return l.entry.ModTime().Local().Format("2006-01-02 15:04:05") })
+	l.AppendOutput(func(entry *ListJSONItem) string {
+		return entry.ModTime.When.Local().Format("2006-01-02 15:04:05")
+	})
 }
 
 // AddSize adds file's size to output
 func (l *ListFormat) AddSize() {
-	l.AppendOutput(func() string {
-		return strconv.FormatInt(l.entry.Size(), 10)
+	l.AppendOutput(func(entry *ListJSONItem) string {
+		return strconv.FormatInt(entry.Size, 10)
 	})
+}
+
+// normalisePath makes sure the path has the correct slashes for the current mode
+func (l *ListFormat) normalisePath(entry *ListJSONItem, remote string) string {
+	if l.absolute && !strings.HasPrefix(remote, "/") {
+		remote = "/" + remote
+	}
+	if entry.IsDir && l.dirSlash {
+		remote += "/"
+	}
+	return remote
 }
 
 // AddPath adds path to file to output
 func (l *ListFormat) AddPath() {
-	l.AppendOutput(func() string {
-		remote := l.entry.Remote()
-		if l.absolute && !strings.HasPrefix(remote, "/") {
-			remote = "/" + remote
-		}
-		_, isDir := l.entry.(fs.Directory)
-		if isDir && l.dirSlash {
-			remote += "/"
-		}
-		return remote
+	l.AppendOutput(func(entry *ListJSONItem) string {
+		return l.normalisePath(entry, entry.Path)
+	})
+}
+
+// AddEncrypted adds the encrypted path to file to output
+func (l *ListFormat) AddEncrypted() {
+	l.AppendOutput(func(entry *ListJSONItem) string {
+		return l.normalisePath(entry, entry.Encrypted)
 	})
 }
 
 // AddHash adds the hash of the type given to the output
 func (l *ListFormat) AddHash(ht hash.Type) {
-	l.AppendOutput(func() string {
-		o, ok := l.entry.(fs.Object)
-		if !ok {
+	hashName := ht.String()
+	l.AppendOutput(func(entry *ListJSONItem) string {
+		if entry.IsDir {
 			return ""
 		}
-		return hashSum(ht, o)
+		return entry.Hashes[hashName]
 	})
 }
 
 // AddID adds file's ID to the output if known
 func (l *ListFormat) AddID() {
-	l.AppendOutput(func() string {
-		if do, ok := l.entry.(fs.IDer); ok {
-			return do.ID()
-		}
-		return ""
+	l.AppendOutput(func(entry *ListJSONItem) string {
+		return entry.ID
+	})
+}
+
+// AddOrigID adds file's Original ID to the output if known
+func (l *ListFormat) AddOrigID() {
+	l.AppendOutput(func(entry *ListJSONItem) string {
+		return entry.OrigID
 	})
 }
 
 // AddMimeType adds file's MimeType to the output if known
 func (l *ListFormat) AddMimeType() {
-	l.AppendOutput(func() string {
-		return fs.MimeTypeDirEntry(l.entry)
+	l.AppendOutput(func(entry *ListJSONItem) string {
+		return entry.MimeType
 	})
 }
 
 // AppendOutput adds string generated by specific function to printed output
-func (l *ListFormat) AppendOutput(functionToAppend func() string) {
+func (l *ListFormat) AppendOutput(functionToAppend func(item *ListJSONItem) string) {
 	l.output = append(l.output, functionToAppend)
 }
 
 // Format prints information about the DirEntry in the format defined
-func (l *ListFormat) Format(entry fs.DirEntry) (result string) {
-	l.entry = entry
+func (l *ListFormat) Format(entry *ListJSONItem) (result string) {
 	var out []string
 	for _, fun := range l.output {
-		out = append(out, fun())
+		out = append(out, fun(entry))
 	}
 	if l.csv != nil {
 		l.buf.Reset()

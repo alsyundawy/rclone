@@ -144,7 +144,7 @@ type Fs struct {
 	containerOKMu    sync.Mutex            // mutex to protect container OK
 	containerOK      bool                  // true if we have created the container
 	containerDeleted bool                  // true if we have deleted the container
-	pacer            *pacer.Pacer          // To pace and retry the API calls
+	pacer            *fs.Pacer             // To pace and retry the API calls
 	uploadToken      *pacer.TokenDispenser // control concurrency
 }
 
@@ -347,7 +347,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		opt:         *opt,
 		container:   container,
 		root:        directory,
-		pacer:       pacer.New().SetMinSleep(minSleep).SetMaxSleep(maxSleep).SetDecayConstant(decayConstant).SetPacer(pacer.S3Pacer),
+		pacer:       fs.NewPacer(pacer.NewS3(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
 		uploadToken: pacer.NewTokenDispenser(fs.Config.Transfers),
 		client:      fshttp.NewClient(fs.Config),
 	}
@@ -392,6 +392,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 				return nil, errors.New("Container name in SAS URL and container provided in command do not match")
 			}
 
+			f.container = parts.ContainerName
 			containerURL = azblob.NewContainerURL(*u, pipeline)
 		} else {
 			serviceURL = azblob.NewServiceURL(*u, pipeline)
@@ -1385,16 +1386,16 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 	blob := o.getBlobReference()
 	httpHeaders := azblob.BlobHTTPHeaders{}
 	httpHeaders.ContentType = fs.MimeType(o)
-	// Multipart upload doesn't support MD5 checksums at put block calls, hence calculate
-	// MD5 only for PutBlob requests
-	if size < int64(o.fs.opt.UploadCutoff) {
-		if sourceMD5, _ := src.Hash(hash.MD5); sourceMD5 != "" {
-			sourceMD5bytes, err := hex.DecodeString(sourceMD5)
-			if err == nil {
-				httpHeaders.ContentMD5 = sourceMD5bytes
-			} else {
-				fs.Debugf(o, "Failed to decode %q as MD5: %v", sourceMD5, err)
-			}
+	// Compute the Content-MD5 of the file, for multiparts uploads it
+	// will be set in PutBlockList API call using the 'x-ms-blob-content-md5' header
+	// Note: If multipart, a MD5 checksum will also be computed for each uploaded block
+	// 		 in order to validate its integrity during transport
+	if sourceMD5, _ := src.Hash(hash.MD5); sourceMD5 != "" {
+		sourceMD5bytes, err := hex.DecodeString(sourceMD5)
+		if err == nil {
+			httpHeaders.ContentMD5 = sourceMD5bytes
+		} else {
+			fs.Debugf(o, "Failed to decode %q as MD5: %v", sourceMD5, err)
 		}
 	}
 

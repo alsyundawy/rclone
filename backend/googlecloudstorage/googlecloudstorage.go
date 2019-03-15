@@ -16,6 +16,7 @@ FIXME Patch/Delete/Get isn't working with files with spaces in - giving 404 erro
 */
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -45,6 +46,8 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/googleapi"
+
+	// NOTE: This API is deprecated
 	storage "google.golang.org/api/storage/v1"
 )
 
@@ -145,6 +148,22 @@ func init() {
 				Help:  "Project team owners get OWNER access, and all Users get WRITER access.",
 			}},
 		}, {
+			Name: "bucket_policy_only",
+			Help: `Access checks should use bucket-level IAM policies.
+
+If you want to upload objects to a bucket with Bucket Policy Only set
+then you will need to set this.
+
+When it is set, rclone:
+
+- ignores ACLs set on buckets
+- ignores ACLs set on objects
+- creates buckets with Bucket Policy Only set
+
+Docs: https://cloud.google.com/storage/docs/bucket-policy-only
+`,
+			Default: false,
+		}, {
 			Name: "location",
 			Help: "Location for the newly created buckets.",
 			Examples: []fs.OptionExample{{
@@ -241,6 +260,7 @@ type Options struct {
 	ServiceAccountCredentials string `config:"service_account_credentials"`
 	ObjectACL                 string `config:"object_acl"`
 	BucketACL                 string `config:"bucket_acl"`
+	BucketPolicyOnly          bool   `config:"bucket_policy_only"`
 	Location                  string `config:"location"`
 	StorageClass              string `config:"storage_class"`
 }
@@ -256,7 +276,7 @@ type Fs struct {
 	bucket     string           // the bucket we are working on
 	bucketOKMu sync.Mutex       // mutex to protect bucket OK
 	bucketOK   bool             // true if we have created the bucket
-	pacer      *pacer.Pacer     // To pace the API calls
+	pacer      *fs.Pacer        // To pace the API calls
 }
 
 // Object describes a storage object
@@ -381,7 +401,11 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	} else {
 		oAuthClient, _, err = oauthutil.NewClient(name, m, storageConfig)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to configure Google Cloud Storage")
+			ctx := context.Background()
+			oAuthClient, err = google.DefaultClient(ctx, storage.DevstorageFullControlScope)
+			if err != nil {
+				return nil, errors.Wrap(err, "failed to configure Google Cloud Storage")
+			}
 		}
 	}
 
@@ -395,7 +419,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		bucket: bucket,
 		root:   directory,
 		opt:    *opt,
-		pacer:  pacer.New().SetMinSleep(minSleep).SetPacer(pacer.GoogleDrivePacer),
+		pacer:  fs.NewPacer(pacer.NewGoogleDrive(pacer.MinSleep(minSleep))),
 	}
 	f.features = (&fs.Features{
 		ReadMimeType:  true,
@@ -709,8 +733,19 @@ func (f *Fs) Mkdir(dir string) (err error) {
 		Location:     f.opt.Location,
 		StorageClass: f.opt.StorageClass,
 	}
+	if f.opt.BucketPolicyOnly {
+		bucket.IamConfiguration = &storage.BucketIamConfiguration{
+			BucketPolicyOnly: &storage.BucketIamConfigurationBucketPolicyOnly{
+				Enabled: true,
+			},
+		}
+	}
 	err = f.pacer.Call(func() (bool, error) {
-		_, err = f.svc.Buckets.Insert(f.opt.ProjectNumber, &bucket).PredefinedAcl(f.opt.BucketACL).Do()
+		insertBucket := f.svc.Buckets.Insert(f.opt.ProjectNumber, &bucket)
+		if !f.opt.BucketPolicyOnly {
+			insertBucket.PredefinedAcl(f.opt.BucketACL)
+		}
+		_, err = insertBucket.Do()
 		return shouldRetry(err)
 	})
 	if err == nil {
@@ -976,7 +1011,11 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 	}
 	var newObject *storage.Object
 	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
-		newObject, err = o.fs.svc.Objects.Insert(o.fs.bucket, &object).Media(in, googleapi.ContentType("")).Name(object.Name).PredefinedAcl(o.fs.opt.ObjectACL).Do()
+		insertObject := o.fs.svc.Objects.Insert(o.fs.bucket, &object).Media(in, googleapi.ContentType("")).Name(object.Name)
+		if !o.fs.opt.BucketPolicyOnly {
+			insertObject.PredefinedAcl(o.fs.opt.ObjectACL)
+		}
+		newObject, err = insertObject.Do()
 		return shouldRetry(err)
 	})
 	if err != nil {
