@@ -1,12 +1,17 @@
 package vfs
 
 import (
+	"context"
+	"io"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/ncw/rclone/fs"
-	"github.com/ncw/rclone/fstest"
+	"github.com/pkg/errors"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fstest"
+	"github.com/rclone/rclone/lib/random"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -112,8 +117,11 @@ func TestWriteFileHandleMethods(t *testing.T) {
 	// it even if we don't write to it
 	h, err = vfs.OpenFile("file1", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0777)
 	require.NoError(t, err)
-	assert.NoError(t, h.Close())
-	checkListing(t, root, []string{"file1,0,false"})
+	err = h.Close()
+	if errors.Cause(err) != fs.ErrorCantUploadEmptyFiles {
+		assert.NoError(t, err)
+		checkListing(t, root, []string{"file1,0,false"})
+	}
 
 	// Check opening the file with O_TRUNC and writing does work
 	h, err = vfs.OpenFile("file1", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0777)
@@ -211,6 +219,10 @@ func TestWriteFileHandleRelease(t *testing.T) {
 
 	// Check Release closes file
 	err := fh.Release()
+	if errors.Cause(err) == fs.ErrorCantUploadEmptyFiles {
+		t.Logf("skipping test: %v", err)
+		return
+	}
 	assert.NoError(t, err)
 	assert.True(t, fh.closed)
 
@@ -220,10 +232,41 @@ func TestWriteFileHandleRelease(t *testing.T) {
 	assert.True(t, fh.closed)
 }
 
+var (
+	canSetModTimeOnce  sync.Once
+	canSetModTimeValue = true
+)
+
+// returns whether the remote can set modtime
+func canSetModTime(t *testing.T, r *fstest.Run) bool {
+	canSetModTimeOnce.Do(func() {
+		mtime1 := time.Date(2008, time.November, 18, 17, 32, 31, 0, time.UTC)
+		_ = r.WriteObject(context.Background(), "time_test", "stuff", mtime1)
+		obj, err := r.Fremote.NewObject(context.Background(), "time_test")
+		require.NoError(t, err)
+		mtime2 := time.Date(2009, time.November, 18, 17, 32, 31, 0, time.UTC)
+		err = obj.SetModTime(context.Background(), mtime2)
+		switch err {
+		case nil:
+			canSetModTimeValue = true
+		case fs.ErrorCantSetModTime, fs.ErrorCantSetModTimeWithoutDelete:
+			canSetModTimeValue = false
+		default:
+			require.NoError(t, err)
+		}
+		require.NoError(t, obj.Remove(context.Background()))
+		fs.Debugf(nil, "Can set mod time: %v", canSetModTimeValue)
+	})
+	return canSetModTimeValue
+}
+
 // tests mod time on open files
 func TestWriteFileModTimeWithOpenWriters(t *testing.T) {
 	r := fstest.NewRun(t)
 	defer r.Finalise()
+	if !canSetModTime(t, r) {
+		return
+	}
 	vfs, fh := writeHandleCreate(t, r)
 
 	mtime := time.Date(2012, time.November, 18, 17, 32, 31, 0, time.UTC)
@@ -240,6 +283,53 @@ func TestWriteFileModTimeWithOpenWriters(t *testing.T) {
 	info, err := vfs.Stat("file1")
 	require.NoError(t, err)
 
-	// avoid errors because of timezone differences
-	assert.Equal(t, info.ModTime().Unix(), mtime.Unix())
+	if r.Fremote.Precision() != fs.ModTimeNotSupported {
+		// avoid errors because of timezone differences
+		assert.Equal(t, info.ModTime().Unix(), mtime.Unix())
+	}
+}
+
+func testFileReadAt(t *testing.T, n int) {
+	r := fstest.NewRun(t)
+	defer r.Finalise()
+	vfs, fh := writeHandleCreate(t, r)
+
+	contents := []byte(random.String(n))
+	if n != 0 {
+		written, err := fh.Write(contents)
+		require.NoError(t, err)
+		assert.Equal(t, n, written)
+	}
+
+	// Close the file without writing to it if n==0
+	err := fh.Close()
+	if errors.Cause(err) == fs.ErrorCantUploadEmptyFiles {
+		t.Logf("skipping test: %v", err)
+		return
+	}
+	assert.NoError(t, err)
+
+	// read the file back in using ReadAt into a buffer
+	// this simulates what mount does
+	rd, err := vfs.OpenFile("file1", os.O_RDONLY, 0)
+	require.NoError(t, err)
+
+	buf := make([]byte, 1024)
+	read, err := rd.ReadAt(buf, 0)
+	if err != io.EOF {
+		assert.NoError(t, err)
+	}
+	assert.Equal(t, read, n)
+	assert.Equal(t, contents, buf[:read])
+
+	err = rd.Close()
+	assert.NoError(t, err)
+}
+
+func TestFileReadAtZeroLength(t *testing.T) {
+	testFileReadAt(t, 0)
+}
+
+func TestFileReadAtNonZeroLength(t *testing.T) {
+	testFileReadAt(t, 100)
 }

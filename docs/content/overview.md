@@ -17,24 +17,30 @@ Here is an overview of the major features of each cloud storage system.
 
 | Name                         | Hash        | ModTime | Case Insensitive | Duplicate Files | MIME Type |
 | ---------------------------- |:-----------:|:-------:|:----------------:|:---------------:|:---------:|
+| 1Fichier                     | Whirlpool   | No      | No               | Yes             | R         |
 | Amazon Drive                 | MD5         | No      | Yes              | No              | R         |
 | Amazon S3                    | MD5         | Yes     | No               | No              | R/W       |
 | Backblaze B2                 | SHA1        | Yes     | No               | No              | R/W       |
 | Box                          | SHA1        | Yes     | Yes              | No              | -         |
+| Citrix ShareFile             | MD5         | Yes     | Yes              | No              | -         |
 | Dropbox                      | DBHASH †    | Yes     | Yes              | No              | -         |
 | FTP                          | -           | No      | No               | No              | -         |
 | Google Cloud Storage         | MD5         | Yes     | No               | No              | R/W       |
 | Google Drive                 | MD5         | Yes     | No               | Yes             | R/W       |
+| Google Photos                | -           | No      | No               | Yes             | R         |
 | HTTP                         | -           | No      | No               | No              | R         |
 | Hubic                        | MD5         | Yes     | No               | No              | R/W       |
 | Jottacloud                   | MD5         | Yes     | Yes              | No              | R/W       |
 | Koofr                        | MD5         | No      | Yes              | No              | -         |
+| Mail.ru Cloud                | Mailru ‡‡‡  | Yes     | Yes              | No              | -         |
 | Mega                         | -           | No      | No               | Yes             | -         |
 | Microsoft Azure Blob Storage | MD5         | Yes     | No               | No              | R/W       |
 | Microsoft OneDrive           | SHA1 ‡‡     | Yes     | Yes              | No              | R         |
 | OpenDrive                    | MD5         | Yes     | Yes              | No              | -         |
 | Openstack Swift              | MD5         | Yes     | No               | No              | R/W       |
 | pCloud                       | MD5, SHA1   | Yes     | No               | No              | W         |
+| premiumize.me                | -           | No      | Yes              | No              | R         |
+| put.io                       | CRC-32      | Yes     | No               | Yes             | R         |
 | QingStor                     | MD5         | No      | No               | No              | R/W       |
 | SFTP                         | MD5, SHA1 ‡ | Yes     | Depends          | No              | -         |
 | WebDAV                       | MD5, SHA1 ††| Yes ††† | Depends          | No              | -         |
@@ -65,6 +71,8 @@ or `sha1sum` as well as `echo` are in the remote's PATH.
 ‡‡ Microsoft OneDrive Personal supports SHA1 hashes, whereas OneDrive
 for business and SharePoint server support Microsoft's own
 [QuickXorHash](https://docs.microsoft.com/en-us/onedrive/developer/code-snippets/quickxorhash).
+
+‡‡‡ Mail.ru uses its own modified SHA1 hash
 
 ### ModTime ###
 
@@ -106,6 +114,102 @@ objects with the same name.
 This confuses rclone greatly when syncing - use the `rclone dedupe`
 command to rename or remove duplicates.
 
+### Restricted filenames ###
+
+Some cloud storage systems might have restrictions on the characters
+that are usable in file or directory names.
+When `rclone` detects such a name during a file upload, it will
+transparently replace the restricted characters with similar looking
+Unicode characters.
+
+This process is designed to avoid ambiguous file names as much as
+possible and allow to move files between many cloud storage systems
+transparently.
+
+The name shown by `rclone` to the user or during log output will only
+contain a minimal set of [replaced characters](#restricted-characters)
+to ensure correct formatting and not necessarily the actual name used
+on the cloud storage.
+
+This transformation is reversed when downloading a file or parsing
+`rclone` arguments.
+For example, when uploading a file named `my file?.txt` to Onedrive
+will be displayed as `my file?.txt` on the console, but stored as
+`my file？.txt` (the `?` gets replaced by the similar looking `？`
+character) to Onedrive.
+The reverse transformation allows to read a file`unusual/name.txt`
+from Google Drive, by passing the name `unusual／name.txt` (the `/` needs
+to be replaced by the similar looking `／` character) on the command line.
+
+#### Default restricted characters {#restricted-characters}
+
+The table below shows the characters that are replaced by default.
+
+When a replacement character is found in a filename, this character
+will be escaped with the `‛` character to avoid ambiguous file names.
+(e.g. a file named `␀.txt` would shown as `‛␀.txt`)
+
+Each cloud storage backend can use a different set of characters,
+which will be specified in the documentation for each backend.
+
+| Character | Value | Replacement |
+| --------- |:-----:|:-----------:|
+| NUL       | 0x00  | ␀           |
+| SOH       | 0x01  | ␁           |
+| STX       | 0x02  | ␂           |
+| ETX       | 0x03  | ␃           |
+| EOT       | 0x04  | ␄           |
+| ENQ       | 0x05  | ␅           |
+| ACK       | 0x06  | ␆           |
+| BEL       | 0x07  | ␇           |
+| BS        | 0x08  | ␈           |
+| HT        | 0x09  | ␉           |
+| LF        | 0x0A  | ␊           |
+| VT        | 0x0B  | ␋           |
+| FF        | 0x0C  | ␌           |
+| CR        | 0x0D  | ␍           |
+| SO        | 0x0E  | ␎           |
+| SI        | 0x0F  | ␏           |
+| DLE       | 0x10  | ␐           |
+| DC1       | 0x11  | ␑           |
+| DC2       | 0x12  | ␒           |
+| DC3       | 0x13  | ␓           |
+| DC4       | 0x14  | ␔           |
+| NAK       | 0x15  | ␕           |
+| SYN       | 0x16  | ␖           |
+| ETB       | 0x17  | ␗           |
+| CAN       | 0x18  | ␘           |
+| EM        | 0x19  | ␙           |
+| SUB       | 0x1A  | ␚           |
+| ESC       | 0x1B  | ␛           |
+| FS        | 0x1C  | ␜           |
+| GS        | 0x1D  | ␝           |
+| RS        | 0x1E  | ␞           |
+| US        | 0x1F  | ␟           |
+| /         | 0x2F  | ／           |
+| DEL       | 0x7F  | ␡           |
+
+The default encoding will also encode these file names as they are
+problematic with many cloud storage systems.
+
+| File name | Replacement |
+| --------- |:-----------:|
+| .         | ．          |
+| ..        | ．．         |
+
+#### Invalid UTF-8 bytes {#invalid-utf8}
+
+Some backends only support a sequence of well formed UTF-8 bytes
+as file or directory names.
+
+In this case all invalid UTF-8 bytes will be replaced with a quoted
+representation of the byte value to allow uploading a file to such a
+backend. For example, the invalid byte `0xFE` will be encoded as `‛FE`.
+
+A common source of invalid UTF-8 bytes are local filesystems, that store
+names in a different encoding than UTF-8 or UTF-16, like latin1. See the
+[local filenames](/local/#filenames) section for details.
+
 ### MIME Type ###
 
 MIME types (also known as media types) classify types of documents
@@ -129,30 +233,36 @@ All the remotes support a basic set of features, but there are some
 optional features supported by some remotes used to make some
 operations more efficient.
 
-| Name                         | Purge | Copy | Move | DirMove | CleanUp | ListR | StreamUpload | LinkSharing | About |
-| ---------------------------- |:-----:|:----:|:----:|:-------:|:-------:|:-----:|:------------:|:------------:|:-----:|
-| Amazon Drive                 | Yes   | No   | Yes  | Yes     | No [#575](https://github.com/ncw/rclone/issues/575) | No  | No  | No [#2178](https://github.com/ncw/rclone/issues/2178) | No  |
-| Amazon S3                    | No    | Yes  | No   | No      | No      | Yes   | Yes          | No [#2178](https://github.com/ncw/rclone/issues/2178) | No  |
-| Backblaze B2                 | No    | No   | No   | No      | Yes     | Yes   | Yes          | No [#2178](https://github.com/ncw/rclone/issues/2178) | No  |
-| Box                          | Yes   | Yes  | Yes  | Yes     | No [#575](https://github.com/ncw/rclone/issues/575) | No  | Yes | Yes | No  |
-| Dropbox                      | Yes   | Yes  | Yes  | Yes     | No [#575](https://github.com/ncw/rclone/issues/575) | No  | Yes | Yes | Yes |
-| FTP                          | No    | No   | Yes  | Yes     | No      | No    | Yes          | No [#2178](https://github.com/ncw/rclone/issues/2178) | No  |
-| Google Cloud Storage         | Yes   | Yes  | No   | No      | No      | Yes   | Yes          | No [#2178](https://github.com/ncw/rclone/issues/2178) | No  |
-| Google Drive                 | Yes   | Yes  | Yes  | Yes     | Yes     | Yes   | Yes          | Yes         | Yes |
-| HTTP                         | No    | No   | No   | No      | No      | No    | No           | No [#2178](https://github.com/ncw/rclone/issues/2178) | No  |
-| Hubic                        | Yes † | Yes  | No   | No      | No      | Yes   | Yes          | No [#2178](https://github.com/ncw/rclone/issues/2178) | Yes |
-| Jottacloud                   | Yes   | Yes  | Yes  | Yes     | No      | Yes   | No           | Yes                                                   | Yes |
-| Mega                         | Yes   | No   | Yes  | Yes     | No      | No    | No           | No [#2178](https://github.com/ncw/rclone/issues/2178) | Yes |
-| Microsoft Azure Blob Storage | Yes   | Yes  | No   | No      | No      | Yes   | No           | No [#2178](https://github.com/ncw/rclone/issues/2178) | No  |
-| Microsoft OneDrive           | Yes   | Yes  | Yes  | Yes     | No [#575](https://github.com/ncw/rclone/issues/575) | No | No | Yes | Yes |
-| OpenDrive                    | Yes   | Yes  | Yes  | Yes     | No      | No    | No           | No                                                    | No  |
-| Openstack Swift              | Yes † | Yes  | No   | No      | No      | Yes   | Yes          | No [#2178](https://github.com/ncw/rclone/issues/2178) | Yes |
-| pCloud                       | Yes   | Yes  | Yes  | Yes     | Yes     | No    | No           | No [#2178](https://github.com/ncw/rclone/issues/2178) | Yes |
-| QingStor                     | No    | Yes  | No   | No      | No      | Yes   | No           | No [#2178](https://github.com/ncw/rclone/issues/2178) | No  |
-| SFTP                         | No    | No   | Yes  | Yes     | No      | No    | Yes          | No [#2178](https://github.com/ncw/rclone/issues/2178) | No  |
-| WebDAV                       | Yes   | Yes  | Yes  | Yes     | No      | No    | Yes ‡        | No [#2178](https://github.com/ncw/rclone/issues/2178) | Yes  |
-| Yandex Disk                  | Yes   | Yes  | Yes  | Yes     | Yes     | No    | Yes          | Yes         | Yes |
-| The local filesystem         | Yes   | No   | Yes  | Yes     | No      | No    | Yes          | No          | Yes |
+| Name                         | Purge | Copy | Move | DirMove | CleanUp | ListR | StreamUpload | LinkSharing | About | EmptyDir |
+| ---------------------------- |:-----:|:----:|:----:|:-------:|:-------:|:-----:|:------------:|:------------:|:-----:| :------: |
+| 1Fichier                     | No    | No   | No   | No      | No      | No    | No           | No           |   No  |  Yes |
+| Amazon Drive                 | Yes   | No   | Yes  | Yes     | No [#575](https://github.com/rclone/rclone/issues/575) | No  | No  | No [#2178](https://github.com/rclone/rclone/issues/2178) | No  | Yes |
+| Amazon S3                    | No    | Yes  | No   | No      | No      | Yes   | Yes          | No [#2178](https://github.com/rclone/rclone/issues/2178) | No  | No |
+| Backblaze B2                 | No    | Yes  | No   | No      | Yes     | Yes   | Yes          | Yes | No  | No |
+| Box                          | Yes   | Yes  | Yes  | Yes     | No [#575](https://github.com/rclone/rclone/issues/575) | No  | Yes | Yes | No  | Yes |
+| Citrix ShareFile             | Yes   | Yes  | Yes  | Yes     | No      | No    | Yes          | No          | No  | Yes |
+| Dropbox                      | Yes   | Yes  | Yes  | Yes     | No [#575](https://github.com/rclone/rclone/issues/575) | No  | Yes | Yes | Yes | Yes |
+| FTP                          | No    | No   | Yes  | Yes     | No      | No    | Yes          | No [#2178](https://github.com/rclone/rclone/issues/2178) | No  | Yes |
+| Google Cloud Storage         | Yes   | Yes  | No   | No      | No      | Yes   | Yes          | No [#2178](https://github.com/rclone/rclone/issues/2178) | No  | No |
+| Google Drive                 | Yes   | Yes  | Yes  | Yes     | Yes     | Yes   | Yes          | Yes         | Yes | Yes |
+| Google Photos                | No    | No   | No   | No      | No      | No    | No           | No          | No | No |
+| HTTP                         | No    | No   | No   | No      | No      | No    | No           | No [#2178](https://github.com/rclone/rclone/issues/2178) | No  | Yes |
+| Hubic                        | Yes † | Yes  | No   | No      | No      | Yes   | Yes          | No [#2178](https://github.com/rclone/rclone/issues/2178) | Yes | No |
+| Jottacloud                   | Yes   | Yes  | Yes  | Yes     | No      | Yes   | No           | Yes                                                   | Yes | Yes |
+| Mail.ru Cloud                | Yes   | Yes  | Yes  | Yes     | Yes     | No    | No           | Yes                                                   | Yes | Yes |
+| Mega                         | Yes   | No   | Yes  | Yes     | Yes     | No    | No           | No [#2178](https://github.com/rclone/rclone/issues/2178) | Yes | Yes |
+| Microsoft Azure Blob Storage | Yes   | Yes  | No   | No      | No      | Yes   | No           | No [#2178](https://github.com/rclone/rclone/issues/2178) | No  | No |
+| Microsoft OneDrive           | Yes   | Yes  | Yes  | Yes     | No [#575](https://github.com/rclone/rclone/issues/575) | No | No | Yes | Yes | Yes |
+| OpenDrive                    | Yes   | Yes  | Yes  | Yes     | No      | No    | No           | No                                                    | No  | Yes |
+| Openstack Swift              | Yes † | Yes  | No   | No      | No      | Yes   | Yes          | No [#2178](https://github.com/rclone/rclone/issues/2178) | Yes | No |
+| pCloud                       | Yes   | Yes  | Yes  | Yes     | Yes     | No    | No           | No [#2178](https://github.com/rclone/rclone/issues/2178) | Yes | Yes |
+| premiumize.me                | Yes   | No   | Yes  | Yes     | No      | No    | No           | Yes         | Yes | Yes |
+| put.io                       | Yes   | No   | Yes  | Yes     | Yes     | No    | Yes          | No [#2178](https://github.com/rclone/rclone/issues/2178) | Yes | Yes |
+| QingStor                     | No    | Yes  | No   | No      | No      | Yes   | No           | No [#2178](https://github.com/rclone/rclone/issues/2178) | No  | No |
+| SFTP                         | No    | No   | Yes  | Yes     | No      | No    | Yes          | No [#2178](https://github.com/rclone/rclone/issues/2178) | Yes  | Yes |
+| WebDAV                       | Yes   | Yes  | Yes  | Yes     | No      | No    | Yes ‡        | No [#2178](https://github.com/rclone/rclone/issues/2178) | Yes  | Yes |
+| Yandex Disk                  | Yes   | Yes  | Yes  | Yes     | Yes     | No    | Yes          | Yes         | Yes | Yes |
+| The local filesystem         | Yes   | No   | Yes  | Yes     | No      | No    | Yes          | No          | Yes | Yes |
 
 ### Purge ###
 
@@ -225,3 +335,8 @@ This is also used to return the space used, available for `rclone mount`.
 
 If the server can't do `About` then `rclone about` will return an
 error.
+
+### EmptyDir ###
+
+The remote supports empty directories. See [Limitations](/bugs/#limitations)
+ for details. Most Object/Bucket based remotes do not support this.

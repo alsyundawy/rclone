@@ -9,6 +9,7 @@ package main
 
 import (
 	"archive/tar"
+	"compress/bzip2"
 	"compress/gzip"
 	"encoding/json"
 	"flag"
@@ -27,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ncw/rclone/lib/rest"
+	"github.com/rclone/rclone/lib/rest"
 	"golang.org/x/net/html"
 	"golang.org/x/sys/unix"
 )
@@ -244,8 +245,10 @@ func getAssetFromReleasesPage(project string, matchName *regexp.Regexp) (assetUR
 				if a.Key == "href" {
 					if name := path.Base(a.Val); matchName.MatchString(name) && isOurOsArch(name) {
 						if u, err := rest.URLJoin(base, a.Val); err == nil {
-							assetName = name
-							assetURL = u.String()
+							if assetName == "" {
+								assetName = name
+								assetURL = u.String()
+							}
 						}
 					}
 					break
@@ -347,6 +350,8 @@ func untar(srcFile, fileName, extractDir string) {
 			log.Fatalf("Couldn't open gzip: %v", err)
 		}
 		in = gzf
+	} else if srcExt == ".bz2" {
+		in = bzip2.NewReader(f)
 	}
 
 	tarReader := tar.NewReader(in)

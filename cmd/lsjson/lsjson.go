@@ -1,14 +1,15 @@
 package lsjson
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 
-	"github.com/ncw/rclone/cmd"
-	"github.com/ncw/rclone/cmd/ls/lshelp"
-	"github.com/ncw/rclone/fs/operations"
 	"github.com/pkg/errors"
+	"github.com/rclone/rclone/cmd"
+	"github.com/rclone/rclone/cmd/ls/lshelp"
+	"github.com/rclone/rclone/fs/operations"
 	"github.com/spf13/cobra"
 )
 
@@ -23,6 +24,8 @@ func init() {
 	commandDefintion.Flags().BoolVarP(&opt.NoModTime, "no-modtime", "", false, "Don't read the modification time (can speed things up).")
 	commandDefintion.Flags().BoolVarP(&opt.ShowEncrypted, "encrypted", "M", false, "Show the encrypted names.")
 	commandDefintion.Flags().BoolVarP(&opt.ShowOrigIDs, "original", "", false, "Show the ID of the underlying Object.")
+	commandDefintion.Flags().BoolVarP(&opt.FilesOnly, "files-only", "", false, "Show only files in the listing.")
+	commandDefintion.Flags().BoolVarP(&opt.DirsOnly, "dirs-only", "", false, "Show only directories in the listing.")
 }
 
 var commandDefintion = &cobra.Command{
@@ -40,13 +43,16 @@ The output is an array of Items, where each Item looks like this
       },
       "ID": "y2djkhiujf83u33",
       "OrigID": "UYOJVTUW00Q1RzTDA",
+      "IsBucket" : false,
       "IsDir" : false,
       "MimeType" : "application/octet-stream",
       "ModTime" : "2017-05-31T16:15:57.034468261+01:00",
       "Name" : "file.txt",
       "Encrypted" : "v0qpsdq8anpci8n929v3uu9338",
+      "EncryptedPath" : "kja9098349023498/v0qpsdq8anpci8n929v3uu9338",
       "Path" : "full/path/goes/here/file.txt",
-      "Size" : 6
+      "Size" : 6,
+      "Tier" : "hot",
    }
 
 If --hash is not specified the Hashes property won't be emitted.
@@ -55,10 +61,18 @@ If --no-modtime is specified then ModTime will be blank.
 
 If --encrypted is not specified the Encrypted won't be emitted.
 
+If --dirs-only is not specified files in addition to directories are returned
+
+If --files-only is not specified directories in addition to the files will be returned.
+
 The Path field will only show folders below the remote path being listed.
 If "remote:path" contains the file "subfolder/file.txt", the Path for "file.txt"
 will be "subfolder/file.txt", not "remote:path/subfolder/file.txt".
 When used without --recursive the Path will always be the same as Name.
+
+If the directory is a bucket in a bucket based backend, then
+"IsBucket" will be set to true. This key won't be present unless it is
+"true".
 
 The time is in RFC3339 format with up to nanosecond precision.  The
 number of decimal digits in the seconds will depend on the precision
@@ -77,7 +91,7 @@ can be processed line by line as each item is written one to a line.
 		cmd.Run(false, false, command, func() error {
 			fmt.Println("[")
 			first := true
-			err := operations.ListJSON(fsrc, "", &opt, func(item *operations.ListJSONItem) error {
+			err := operations.ListJSON(context.Background(), fsrc, "", &opt, func(item *operations.ListJSONItem) error {
 				out, err := json.Marshal(item)
 				if err != nil {
 					return errors.Wrap(err, "failed to marshal list object")

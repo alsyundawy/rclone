@@ -4,7 +4,7 @@ description: "Rclone docs for Google drive"
 date: "2016-04-12"
 ---
 
-<i class="fa fa-google"></i> Google Drive
+<i class="fab fa-google"></i> Google Drive
 -----------------------------------------
 
 Paths are specified as `drive:path`
@@ -33,7 +33,7 @@ name> remote
 Type of storage to configure.
 Choose a number from below, or type in your own value
 [snip]
-10 / Google Drive
+XX / Google Drive
    \ "drive"
 [snip]
 Storage> drive
@@ -162,7 +162,7 @@ directories.
 ### Root folder ID ###
 
 You can set the `root_folder_id` for rclone.  This is the directory
-(identified by its `Folder ID`) that rclone considers to be a the root
+(identified by its `Folder ID`) that rclone considers to be the root
 of your drive.
 
 Normally you will leave this blank and rclone will determine the
@@ -321,7 +321,7 @@ docs](/docs/#fast-list) for more details.
 It does this by combining multiple `list` calls into a single API request.
 
 This works by combining many `'%s' in parents` filters into one expression.
-To list the contents of directories a, b and c, the the following requests will be send by the regular `List` function:
+To list the contents of directories a, b and c, the following requests will be send by the regular `List` function:
 ```
 trashed=false and 'a' in parents
 trashed=false and 'b' in parents
@@ -355,6 +355,14 @@ large folder (10600 directories, 39000 files):
 
 Google drive stores modification times accurate to 1 ms.
 
+#### Restricted filename characters
+
+Only Invalid UTF-8 bytes will be [replaced](/overview/#invalid-utf8),
+as they can't be used in JSON strings.
+
+In contrast to other backends, `/` can also be used in names and `.`
+or `..` are valid names.
+
 ### Revisions ###
 
 Google drive stores revisions of files.  When you upload a change to
@@ -379,6 +387,10 @@ variable.
 If you wish to empty your trash you can use the `rclone cleanup remote:`
 command which will permanently delete all your trashed files. This command
 does not take any path arguments.
+
+Note that Google Drive takes some time (minutes to days) to empty the
+trash even though the command returns within a few seconds.  No output
+is echoed, so there will be no confirmation even using -v or -vv.
 
 ### Quota information ###
 
@@ -407,17 +419,17 @@ pdf`, or if you prefer openoffice/libreoffice formats you might use
 `--drive-export-formats ods,odt,odp`.
 
 Note that rclone adds the extension to the google doc, so if it is
-calles `My Spreadsheet` on google docs, it will be exported as `My
+called `My Spreadsheet` on google docs, it will be exported as `My
 Spreadsheet.xlsx` or `My Spreadsheet.pdf` etc.
 
-When importing files into Google Drive, rclone will conververt all
+When importing files into Google Drive, rclone will convert all
 files with an extension in `--drive-import-formats` to their
 associated document type.
 rclone will not convert any files by default, since the conversion
 is lossy process.
 
 The conversion must result in a file with the same extension when
-the `--drive-export-formats` rules are applied to the uploded document.
+the `--drive-export-formats` rules are applied to the uploaded document.
 
 Here are some examples for allowed and prohibited conversions.
 
@@ -434,7 +446,7 @@ Here are some examples for allowed and prohibited conversions.
 This limitation can be disabled by specifying `--drive-allow-import-name-change`.
 When using this flag, rclone can convert multiple files types resulting
 in the same document type at once, eg with `--drive-import-formats docx,odt,txt`,
-all files having these extension would result in a doument represented as a docx file.
+all files having these extension would result in a document represented as a docx file.
 This brings the additional risk of overwriting a document, if multiple files
 have the same stem. Many rclone operations will not handle this name change
 in any way. They assume an equal name when copying files and might copy the
@@ -446,7 +458,7 @@ listed here. Some of these additional ones might only be available when
 the operating system provides the correct MIME type entries.
 
 This list can be changed by Google Drive at any time and might not
-represent the currently available converions.
+represent the currently available conversions.
 
 | Extension | Mime Type | Description |
 | --------- |-----------| ------------|
@@ -470,8 +482,8 @@ represent the currently available converions.
 | xlsx | application/vnd.openxmlformats-officedocument.spreadsheetml.sheet | Microsoft Office Spreadsheet |
 | zip  | application/zip | A ZIP file of HTML, Images CSS |
 
-Google douments can also be exported as link files. These files will
-open a browser window for the Google Docs website of that dument
+Google documents can also be exported as link files. These files will
+open a browser window for the Google Docs website of that document
 when opened. The link file extension has to be specified as a
 `--drive-export-formats` parameter. They will match all available
 Google Documents.
@@ -491,7 +503,9 @@ Here are the standard options specific to drive (Google Drive).
 #### --drive-client-id
 
 Google Application Client Id
-Leave blank normally.
+Setting your own is recommended.
+See https://rclone.org/drive/#making-your-own-client-id for how to create your own.
+If you leave this blank, it will use an internal key which is low performance.
 
 - Config:      client_id
 - Env Var:     RCLONE_DRIVE_CLIENT_ID
@@ -501,7 +515,7 @@ Leave blank normally.
 #### --drive-client-secret
 
 Google Application Client Secret
-Leave blank normally.
+Setting your own is recommended.
 
 - Config:      client_secret
 - Env Var:     RCLONE_DRIVE_CLIENT_SECRET
@@ -605,6 +619,26 @@ If given, gdocs practically become invisible to rclone.
 
 - Config:      skip_gdocs
 - Env Var:     RCLONE_DRIVE_SKIP_GDOCS
+- Type:        bool
+- Default:     false
+
+#### --drive-skip-checksum-gphotos
+
+Skip MD5 checksum on Google photos and videos only.
+
+Use this if you get checksum errors when transferring Google photos or
+videos.
+
+Setting this flag will cause Google photos and videos to return a
+blank MD5 checksum.
+
+Google photos are identifed by being in the "photos" space.
+
+Corrupted checksums are caused by Google modifying the image/video but
+not updating the checksum.
+
+- Config:      skip_checksum_gphotos
+- Env Var:     RCLONE_DRIVE_SKIP_CHECKSUM_GPHOTOS
 - Type:        bool
 - Default:     false
 
@@ -722,7 +756,7 @@ export URLs for drive documents.  Users have reported that the
 official export URLs can't export large documents, whereas these
 unofficial ones can.
 
-See rclone issue [#2243](https://github.com/ncw/rclone/issues/2243) for background,
+See rclone issue [#2243](https://github.com/rclone/rclone/issues/2243) for background,
 [this google drive issue](https://issuetracker.google.com/issues/36761333) and
 [this helpful post](https://www.labnol.org/internet/direct-links-for-google-drive/28356/).
 
@@ -778,6 +812,18 @@ Keep new head revision of each file forever.
 - Type:        bool
 - Default:     false
 
+#### --drive-size-as-quota
+
+Show storage quota usage for file size.
+
+The storage used by a file is the size of the current version plus any
+older versions that have been set to keep forever.
+
+- Config:      size_as_quota
+- Env Var:     RCLONE_DRIVE_SIZE_AS_QUOTA
+- Type:        bool
+- Default:     false
+
 #### --drive-v2-download-min-size
 
 If Object's are greater, use drive v2 API to download.
@@ -805,6 +851,20 @@ Number of API calls to allow without sleeping.
 - Type:        int
 - Default:     100
 
+#### --drive-server-side-across-configs
+
+Allow server side operations (eg copy) to work across different drive configs.
+
+This can be useful if you wish to do a server side copy between two
+different Google drives.  Note that this isn't enabled by default
+because it isn't easy to tell if it will work beween any two
+configurations.
+
+- Config:      server_side_across_configs
+- Env Var:     RCLONE_DRIVE_SERVER_SIDE_ACROSS_CONFIGS
+- Type:        bool
+- Default:     false
+
 <!--- autogenerated options stop -->
 
 ### Limitations ###
@@ -830,9 +890,12 @@ without downloading them.
 Google docs will transfer correctly with `rclone sync`, `rclone copy`
 etc as rclone knows to ignore the size when doing the transfer.
 
-However an unfortunate consequence of this is that you can't download
-Google docs using `rclone mount` - you will get a 0 sized file.  If
-you try again the doc may gain its correct size and be downloadable.
+However an unfortunate consequence of this is that you may not be able
+to download Google docs using `rclone mount`. If it doesn't work you
+will get a 0 sized file.  If you try again the doc may gain its
+correct size and be downloadable. Whther it will work on not depends
+on the application accessing the mount and the OS you are running -
+experiment to find out if it does work for you!
 
 ### Duplicated files ###
 
@@ -884,7 +947,7 @@ be the same account as the Google Drive you want to access)
 2. Select a project or create a new project.
 
 3. Under "ENABLE APIS AND SERVICES" search for "Drive", and enable the
-then "Google Drive API".
+"Google Drive API".
 
 4. Click "Credentials" in the left-side panel (not "Create
 credentials", which opens the wizard), then "Create credentials", then

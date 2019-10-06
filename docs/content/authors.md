@@ -246,3 +246,52 @@ Contributors
   * jaKa Močnik <jaka@koofr.net>
   * Fionera <fionera@fionera.de>
   * Dan Walters <dan@walters.io>
+  * Danil Semelenov <sgtpep@users.noreply.github.com>
+  * xopez <28950736+xopez@users.noreply.github.com>
+  * Ben Boeckel <mathstuf@gmail.com>
+  * Manu <manu@snapdragon.cc>
+  * Kyle E. Mitchell <kyle@kemitchell.com>
+  * Gary Kim <gary@garykim.dev>
+  * Jon <jonathn@github.com>
+  * Jeff Quinn <jeffrey.quinn@bluevoyant.com>
+  * Peter Berbec <peter@berbec.com>
+  * didil <1284255+didil@users.noreply.github.com>
+  * id01 <gaviniboom@gmail.com>
+  * Robert Marko <robimarko@gmail.com>
+  * Philip Harvey <32467456+pharveybattelle@users.noreply.github.com>
+  * JorisE <JorisE@users.noreply.github.com>
+  * garry415 <garry.415@gmail.com>
+  * forgems <forgems@gmail.com>
+  * Florian Apolloner <florian@apolloner.eu>
+  * Aleksandar Jankovic <office@ajankovic.com>
+  * Maran <maran@protonmail.com>
+  * nguyenhuuluan434 <nguyenhuuluan434@gmail.com>
+  * Laura Hausmann <zotan@zotan.pw> <laura@hausmann.dev>
+  * yparitcher <y@paritcher.com>
+  * AbelThar <abela.tharen@gmail.com>
+  * Matti Niemenmaa <matti.niemenmaa+git@iki.fi>
+  * Russell Davis <russelldavis@users.noreply.github.com>
+  * Yi FU <yi.fu@tink.se>
+  * Paul Millar <paul.millar@desy.de>
+  * justinalin <justinalin@qnap.com>
+  * EliEron <subanimehd@gmail.com>
+  * justina777 <chiahuei.lin@gmail.com>
+  * Chaitanya Bankanhal <bchaitanya15@gmail.com>
+  * Michał Matczuk <michal@scylladb.com>
+  * Macavirus <macavirus@zoho.com>
+  * Abhinav Sharma <abhi18av@users.noreply.github.com>
+  * ginvine <34869051+ginvine@users.noreply.github.com>
+  * Patrick Wang <mail6543210@yahoo.com.tw>
+  * Cenk Alti <cenkalti@gmail.com>
+  * Andreas Chlupka <andy@chlupka.com>
+  * Alfonso Montero <amontero@tinet.org>
+  * Ivan Andreev <ivandeex@gmail.com>
+  * David Baumgold <david@davidbaumgold.com>
+  * Lars Lehtonen <lars.lehtonen@gmail.com>
+  * Matei David <matei.david@gmail.com>
+  * David <david.bramwell@endemolshine.com>
+  * Anthony Rusdi <33247310+antrusd@users.noreply.github.com>
+  * Richard Patel <me@terorie.dev>
+  * 庄天翼 <zty0826@gmail.com>
+  * SwitchJS <dev@switchjs.com>
+  * Raphael <PowershellNinja@users.noreply.github.com>

@@ -1,6 +1,7 @@
 package koofr
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -10,15 +11,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ncw/rclone/fs"
-	"github.com/ncw/rclone/fs/config/configmap"
-	"github.com/ncw/rclone/fs/config/configstruct"
-	"github.com/ncw/rclone/fs/config/obscure"
-	"github.com/ncw/rclone/fs/hash"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/config/configstruct"
+	"github.com/rclone/rclone/fs/config/obscure"
+	"github.com/rclone/rclone/fs/encodings"
+	"github.com/rclone/rclone/fs/hash"
 
 	httpclient "github.com/koofr/go-httpclient"
 	koofrclient "github.com/koofr/go-koofrclient"
 )
+
+const enc = encodings.Koofr
 
 // Register Fs with rclone
 func init() {
@@ -40,6 +44,12 @@ func init() {
 				Default:  "",
 				Advanced: true,
 			}, {
+				Name:     "setmtime",
+				Help:     "Does the backend support setting modification time. Set this to false if you use a mount ID that points to a Dropbox or Amazon Drive backend.",
+				Default:  true,
+				Required: true,
+				Advanced: true,
+			}, {
 				Name:     "user",
 				Help:     "Your Koofr user name",
 				Required: true,
@@ -59,6 +69,7 @@ type Options struct {
 	MountID  string `config:"mountid"`
 	User     string `config:"user"`
 	Password string `config:"password"`
+	SetMTime bool   `config:"setmtime"`
 }
 
 // A Fs is a representation of a remote Koofr Fs
@@ -105,7 +116,7 @@ func (o *Object) Remote() string {
 }
 
 // ModTime returns the modification time of the Object
-func (o *Object) ModTime() time.Time {
+func (o *Object) ModTime(ctx context.Context) time.Time {
 	return time.Unix(o.info.Modified/1000, (o.info.Modified%1000)*1000*1000)
 }
 
@@ -120,7 +131,7 @@ func (o *Object) Fs() fs.Info {
 }
 
 // Hash returns an MD5 hash of the Object
-func (o *Object) Hash(typ hash.Type) (string, error) {
+func (o *Object) Hash(ctx context.Context, typ hash.Type) (string, error) {
 	if typ == hash.MD5 {
 		return o.info.Hash, nil
 	}
@@ -138,14 +149,15 @@ func (o *Object) Storable() bool {
 }
 
 // SetModTime is not supported
-func (o *Object) SetModTime(mtime time.Time) error {
-	return nil
+func (o *Object) SetModTime(ctx context.Context, mtime time.Time) error {
+	return fs.ErrorCantSetModTimeWithoutDelete
 }
 
 // Open opens the Object for reading
-func (o *Object) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
+func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadCloser, error) {
 	var sOff, eOff int64 = 0, -1
 
+	fs.FixRangeOption(options, o.Size())
 	for _, option := range options {
 		switch x := option.(type) {
 		case *fs.SeekOption:
@@ -162,13 +174,6 @@ func (o *Object) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
 	if sOff == 0 && eOff < 0 {
 		return o.fs.client.FilesGet(o.fs.mountID, o.fullPath())
 	}
-	if sOff < 0 {
-		sOff = o.Size() - eOff
-		eOff = o.Size()
-	}
-	if eOff > o.Size() {
-		eOff = o.Size()
-	}
 	span := &koofrclient.FileSpan{
 		Start: sOff,
 		End:   eOff,
@@ -177,11 +182,13 @@ func (o *Object) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
 }
 
 // Update updates the Object contents
-func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
-	putopts := &koofrclient.PutFilter{
-		ForceOverwrite:    true,
-		NoRename:          true,
-		IgnoreNonExisting: true,
+func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
+	mtime := src.ModTime(ctx).UnixNano() / 1000 / 1000
+	putopts := &koofrclient.PutOptions{
+		ForceOverwrite:             true,
+		NoRename:                   true,
+		OverwriteIgnoreNonExisting: true,
+		SetModified:                &mtime,
 	}
 	fullPath := o.fullPath()
 	dirPath := dir(fullPath)
@@ -190,7 +197,7 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 	if err != nil {
 		return err
 	}
-	info, err := o.fs.client.FilesPutOptions(o.fs.mountID, dirPath, name, in, putopts)
+	info, err := o.fs.client.FilesPutWithOptions(o.fs.mountID, dirPath, name, in, putopts)
 	if err != nil {
 		return err
 	}
@@ -199,7 +206,7 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 }
 
 // Remove deletes the remote Object
-func (o *Object) Remove() error {
+func (o *Object) Remove(ctx context.Context) error {
 	return o.fs.client.FilesDelete(o.fs.mountID, o.fullPath())
 }
 
@@ -225,7 +232,10 @@ func (f *Fs) Features() *fs.Features {
 
 // Precision denotes that setting modification times is not supported
 func (f *Fs) Precision() time.Duration {
-	return fs.ModTimeNotSupported
+	if !f.opt.SetMTime {
+		return fs.ModTimeNotSupported
+	}
+	return time.Millisecond
 }
 
 // Hashes returns a set of hashes are Provided by the Fs
@@ -235,7 +245,7 @@ func (f *Fs) Hashes() hash.Set {
 
 // fullPath constructs a full, absolute path from a Fs root relative path,
 func (f *Fs) fullPath(part string) string {
-	return path.Join("/", f.root, part)
+	return enc.FromStandardPath(path.Join("/", f.root, part))
 }
 
 // NewFs constructs a new filesystem given a root path and configuration options
@@ -286,7 +296,7 @@ func NewFs(name, root string, m configmap.Mapper) (ff fs.Fs, err error) {
 		}
 		return nil, errors.New("Failed to find mount " + opt.MountID)
 	}
-	rootFile, err := f.client.FilesInfo(f.mountID, "/"+f.root)
+	rootFile, err := f.client.FilesInfo(f.mountID, enc.FromStandardPath("/"+f.root))
 	if err == nil && rootFile.Type != "dir" {
 		f.root = dir(f.root)
 		err = fs.ErrorIsFile
@@ -297,20 +307,21 @@ func NewFs(name, root string, m configmap.Mapper) (ff fs.Fs, err error) {
 }
 
 // List returns a list of items in a directory
-func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
+func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
 	files, err := f.client.FilesList(f.mountID, f.fullPath(dir))
 	if err != nil {
 		return nil, translateErrorsDir(err)
 	}
 	entries = make([]fs.DirEntry, len(files))
 	for i, file := range files {
+		remote := path.Join(dir, enc.ToStandardName(file.Name))
 		if file.Type == "dir" {
-			entries[i] = fs.NewDir(path.Join(dir, file.Name), time.Unix(0, 0))
+			entries[i] = fs.NewDir(remote, time.Unix(0, 0))
 		} else {
 			entries[i] = &Object{
 				fs:     f,
 				info:   file,
-				remote: path.Join(dir, file.Name),
+				remote: remote,
 			}
 		}
 	}
@@ -318,7 +329,7 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 }
 
 // NewObject creates a new remote Object for a given remote path
-func (f *Fs) NewObject(remote string) (obj fs.Object, err error) {
+func (f *Fs) NewObject(ctx context.Context, remote string) (obj fs.Object, err error) {
 	info, err := f.client.FilesInfo(f.mountID, f.fullPath(remote))
 	if err != nil {
 		return nil, translateErrorsObject(err)
@@ -334,11 +345,13 @@ func (f *Fs) NewObject(remote string) (obj fs.Object, err error) {
 }
 
 // Put updates a remote Object
-func (f *Fs) Put(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (obj fs.Object, err error) {
-	putopts := &koofrclient.PutFilter{
-		ForceOverwrite:    true,
-		NoRename:          true,
-		IgnoreNonExisting: true,
+func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (obj fs.Object, err error) {
+	mtime := src.ModTime(ctx).UnixNano() / 1000 / 1000
+	putopts := &koofrclient.PutOptions{
+		ForceOverwrite:             true,
+		NoRename:                   true,
+		OverwriteIgnoreNonExisting: true,
+		SetModified:                &mtime,
 	}
 	fullPath := f.fullPath(src.Remote())
 	dirPath := dir(fullPath)
@@ -347,7 +360,7 @@ func (f *Fs) Put(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (obj
 	if err != nil {
 		return nil, err
 	}
-	info, err := f.client.FilesPutOptions(f.mountID, dirPath, name, in, putopts)
+	info, err := f.client.FilesPutWithOptions(f.mountID, dirPath, name, in, putopts)
 	if err != nil {
 		return nil, translateErrorsObject(err)
 	}
@@ -359,8 +372,8 @@ func (f *Fs) Put(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (obj
 }
 
 // PutStream updates a remote Object with a stream of unknown size
-func (f *Fs) PutStream(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	return f.Put(in, src, options...)
+func (f *Fs) PutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
+	return f.Put(ctx, in, src, options...)
 }
 
 // isBadRequest is a predicate which holds true iff the error returned was
@@ -436,13 +449,13 @@ func (f *Fs) mkdir(fullPath string) error {
 
 // Mkdir creates a directory at the given remote path. Creates ancestors if
 // necessary
-func (f *Fs) Mkdir(dir string) error {
+func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 	fullPath := f.fullPath(dir)
 	return f.mkdir(fullPath)
 }
 
 // Rmdir removes an (empty) directory at the given remote path
-func (f *Fs) Rmdir(dir string) error {
+func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 	files, err := f.client.FilesList(f.mountID, f.fullPath(dir))
 	if err != nil {
 		return translateErrorsDir(err)
@@ -458,24 +471,25 @@ func (f *Fs) Rmdir(dir string) error {
 }
 
 // Copy copies a remote Object to the given path
-func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
+func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
 	dstFullPath := f.fullPath(remote)
 	dstDir := dir(dstFullPath)
 	err := f.mkdir(dstDir)
 	if err != nil {
 		return nil, fs.ErrorCantCopy
 	}
+	mtime := src.ModTime(ctx).UnixNano() / 1000 / 1000
 	err = f.client.FilesCopy((src.(*Object)).fs.mountID,
 		(src.(*Object)).fs.fullPath((src.(*Object)).remote),
-		f.mountID, dstFullPath)
+		f.mountID, dstFullPath, koofrclient.CopyOptions{SetModified: &mtime})
 	if err != nil {
 		return nil, fs.ErrorCantCopy
 	}
-	return f.NewObject(remote)
+	return f.NewObject(ctx, remote)
 }
 
 // Move moves a remote Object to the given path
-func (f *Fs) Move(src fs.Object, remote string) (fs.Object, error) {
+func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
 	srcObj := src.(*Object)
 	dstFullPath := f.fullPath(remote)
 	dstDir := dir(dstFullPath)
@@ -488,11 +502,11 @@ func (f *Fs) Move(src fs.Object, remote string) (fs.Object, error) {
 	if err != nil {
 		return nil, fs.ErrorCantMove
 	}
-	return f.NewObject(remote)
+	return f.NewObject(ctx, remote)
 }
 
 // DirMove moves a remote directory to the given path
-func (f *Fs) DirMove(src fs.Fs, srcRemote, dstRemote string) error {
+func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string) error {
 	srcFs := src.(*Fs)
 	srcFullPath := srcFs.fullPath(srcRemote)
 	dstFullPath := f.fullPath(dstRemote)
@@ -512,7 +526,7 @@ func (f *Fs) DirMove(src fs.Fs, srcRemote, dstRemote string) error {
 }
 
 // About reports space usage (with a MB precision)
-func (f *Fs) About() (*fs.Usage, error) {
+func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
 	mount, err := f.client.MountsDetails(f.mountID)
 	if err != nil {
 		return nil, err
@@ -528,7 +542,7 @@ func (f *Fs) About() (*fs.Usage, error) {
 }
 
 // Purge purges the complete Fs
-func (f *Fs) Purge() error {
+func (f *Fs) Purge(ctx context.Context) error {
 	err := translateErrorsDir(f.client.FilesDelete(f.mountID, f.fullPath("")))
 	return err
 }
@@ -580,7 +594,7 @@ func createLink(c *koofrclient.KoofrClient, mountID string, path string) (*link,
 }
 
 // PublicLink creates a public link to the remote path
-func (f *Fs) PublicLink(remote string) (string, error) {
+func (f *Fs) PublicLink(ctx context.Context, remote string) (string, error) {
 	linkData, err := createLink(f.client, f.mountID, f.fullPath(remote))
 	if err != nil {
 		return "", translateErrorsDir(err)

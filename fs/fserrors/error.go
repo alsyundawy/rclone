@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"reflect"
 	"strings"
+	"time"
 
-	"github.com/pkg/errors"
+	"github.com/rclone/rclone/lib/errors"
 )
 
 // Retrier is an optional interface for error as to whether the
@@ -63,17 +63,21 @@ func RetryError(err error) error {
 	return wrappedRetryError{err}
 }
 
+func (err wrappedRetryError) Cause() error {
+	return err.error
+}
+
 // IsRetryError returns true if err conforms to the Retry interface
 // and calling the Retry method returns true.
-func IsRetryError(err error) bool {
-	if err == nil {
+func IsRetryError(err error) (isRetry bool) {
+	errors.Walk(err, func(err error) bool {
+		if r, ok := err.(Retrier); ok {
+			isRetry = r.Retry()
+			return true
+		}
 		return false
-	}
-	_, err = Cause(err)
-	if r, ok := err.(Retrier); ok {
-		return r.Retry()
-	}
-	return false
+	})
+	return
 }
 
 // Fataler is an optional interface for error as to whether the
@@ -108,17 +112,21 @@ func FatalError(err error) error {
 	return wrappedFatalError{err}
 }
 
+func (err wrappedFatalError) Cause() error {
+	return err.error
+}
+
 // IsFatalError returns true if err conforms to the Fatal interface
 // and calling the Fatal method returns true.
-func IsFatalError(err error) bool {
-	if err == nil {
+func IsFatalError(err error) (isFatal bool) {
+	errors.Walk(err, func(err error) bool {
+		if r, ok := err.(Fataler); ok {
+			isFatal = r.Fatal()
+			return true
+		}
 		return false
-	}
-	_, err = Cause(err)
-	if r, ok := err.(Fataler); ok {
-		return r.Fatal()
-	}
-	return false
+	})
+	return
 }
 
 // NoRetrier is an optional interface for error as to whether the
@@ -153,25 +161,80 @@ func NoRetryError(err error) error {
 	return wrappedNoRetryError{err}
 }
 
+func (err wrappedNoRetryError) Cause() error {
+	return err.error
+}
+
 // IsNoRetryError returns true if err conforms to the NoRetry
 // interface and calling the NoRetry method returns true.
-func IsNoRetryError(err error) bool {
-	if err == nil {
+func IsNoRetryError(err error) (isNoRetry bool) {
+	errors.Walk(err, func(err error) bool {
+		if r, ok := err.(NoRetrier); ok {
+			isNoRetry = r.NoRetry()
+			return true
+		}
 		return false
-	}
-	_, err = Cause(err)
-	if r, ok := err.(NoRetrier); ok {
-		return r.NoRetry()
-	}
-	return false
+	})
+	return
+}
+
+// RetryAfter is an optional interface for error as to whether the
+// operation should be retried after a given delay
+//
+// This should be returned from Update or Put methods as required and
+// will cause the entire sync to be retried after a delay.
+type RetryAfter interface {
+	error
+	RetryAfter() time.Time
+}
+
+// ErrorRetryAfter is an error which expresses a time that should be
+// waited for until trying again
+type ErrorRetryAfter time.Time
+
+// NewErrorRetryAfter returns an ErrorRetryAfter with the given
+// duration as an endpoint
+func NewErrorRetryAfter(d time.Duration) ErrorRetryAfter {
+	return ErrorRetryAfter(time.Now().Add(d))
+}
+
+// Error returns the textual version of the error
+func (e ErrorRetryAfter) Error() string {
+	return fmt.Sprintf("try again after %v (%v)", time.Time(e).Format(time.RFC3339Nano), time.Time(e).Sub(time.Now()))
+}
+
+// RetryAfter returns the time the operation should be retried at or
+// after
+func (e ErrorRetryAfter) RetryAfter() time.Time {
+	return time.Time(e)
+}
+
+// Check interface
+var _ RetryAfter = ErrorRetryAfter{}
+
+// RetryAfterErrorTime returns the time that the RetryAfter error
+// indicates or a Zero time.Time
+func RetryAfterErrorTime(err error) (retryAfter time.Time) {
+	errors.Walk(err, func(err error) bool {
+		if r, ok := err.(RetryAfter); ok {
+			retryAfter = r.RetryAfter()
+			return true
+		}
+		return false
+	})
+	return
+}
+
+// IsRetryAfterError returns true if err is an ErrorRetryAfter
+func IsRetryAfterError(err error) bool {
+	return !RetryAfterErrorTime(err).IsZero()
 }
 
 // Cause is a souped up errors.Cause which can unwrap some standard
 // library errors too.  It returns true if any of the intermediate
 // errors had a Timeout() or Temporary() method which returned true.
 func Cause(cause error) (retriable bool, err error) {
-	err = cause
-	for prev := err; err != nil; prev = err {
+	errors.Walk(cause, func(c error) bool {
 		// Check for net error Timeout()
 		if x, ok := err.(interface {
 			Timeout() bool
@@ -185,41 +248,10 @@ func Cause(cause error) (retriable bool, err error) {
 		}); ok && x.Temporary() {
 			retriable = true
 		}
-
-		// Unwrap 1 level if possible
-		err = errors.Cause(err)
-		if err == nil {
-			// errors.Cause can return nil which isn't
-			// desirable so pick the previous error in
-			// this case.
-			err = prev
-		}
-		if reflect.DeepEqual(err, prev) {
-			// Unpack any struct or *struct with a field
-			// of name Err which satisfies the error
-			// interface.  This includes *url.Error,
-			// *net.OpError, *os.SyscallError and many
-			// others in the stdlib
-			errType := reflect.TypeOf(err)
-			errValue := reflect.ValueOf(err)
-			if errValue.IsValid() && errType.Kind() == reflect.Ptr {
-				errType = errType.Elem()
-				errValue = errValue.Elem()
-			}
-			if errValue.IsValid() && errType.Kind() == reflect.Struct {
-				if errField := errValue.FieldByName("Err"); errField.IsValid() {
-					errFieldValue := errField.Interface()
-					if newErr, ok := errFieldValue.(error); ok {
-						err = newErr
-					}
-				}
-			}
-		}
-		if reflect.DeepEqual(err, prev) {
-			break
-		}
-	}
-	return retriable, err
+		err = c
+		return false
+	})
+	return
 }
 
 // retriableErrorStrings is a list of phrases which when we find it
@@ -234,6 +266,7 @@ var retriableErrorStrings = []string{
 	"transport connection broken",      // net/http/transport.go
 	"http: ContentLength=",             // net/http/transfer.go
 	"server closed idle connection",    // net/http/transport.go
+	"bad record MAC",                   // crypto/tls/alert.go
 }
 
 // Errors which indicate networking errors which should be retried
@@ -291,3 +324,13 @@ func ShouldRetryHTTP(resp *http.Response, retryErrorCodes []int) bool {
 	}
 	return false
 }
+
+type causer interface {
+	Cause() error
+}
+
+var (
+	_ causer = wrappedRetryError{}
+	_ causer = wrappedFatalError{}
+	_ causer = wrappedNoRetryError{}
+)

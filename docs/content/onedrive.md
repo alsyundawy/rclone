@@ -4,7 +4,7 @@ description: "Rclone docs for Microsoft OneDrive"
 date: "2015-10-14"
 ---
 
-<i class="fa fa-windows"></i> Microsoft OneDrive
+<i class="fab fa-windows"></i> Microsoft OneDrive
 -----------------------------------------
 
 Paths are specified as `remote:path`
@@ -34,11 +34,11 @@ name> remote
 Type of storage to configure.
 Enter a string value. Press Enter for the default ("").
 Choose a number from below, or type in your own value
-...
-17 / Microsoft OneDrive
+[snip]
+XX / Microsoft OneDrive
    \ "onedrive"
-...
-Storage> 17
+[snip]
+Storage> onedrive
 Microsoft App Client Id
 Leave blank normally.
 Enter a string value. Press Enter for the default ("").
@@ -148,6 +148,43 @@ Sharepoint Server support
 
 For all types of OneDrive you can use the `--checksum` flag.
 
+#### Restricted filename characters
+
+In addition to the [default restricted characters set](/overview/#restricted-characters)
+the following characters are also replaced:
+
+| Character | Value | Replacement |
+| --------- |:-----:|:-----------:|
+| "         | 0x22  | ＂          |
+| *         | 0x2A  | ＊          |
+| :         | 0x3A  | ：          |
+| <         | 0x3C  | ＜          |
+| >         | 0x3E  | ＞          |
+| ?         | 0x3F  | ？          |
+| \         | 0x5C  | ＼          |
+| \|        | 0x7C  | ｜          |
+| #         | 0x23  | ＃          |
+| %         | 0x25  | ％          |
+
+File names can also not end with the following characters.
+These only get replaced if they are last character in the name:
+
+| Character | Value | Replacement |
+| --------- |:-----:|:-----------:|
+| SP        | 0x20  | ␠           |
+| .         | 0x2E  | ．          |
+
+File names can also not begin with the following characters.
+These only get replaced if they are first character in the name:
+
+| Character | Value | Replacement |
+| --------- |:-----:|:-----------:|
+| SP        | 0x20  | ␠           |
+| ~         | 0x7E  | ～          |
+
+Invalid UTF-8 bytes will also be [replaced](/overview/#invalid-utf8),
+as they can't be used in JSON strings.
+
 ### Deleting files ###
 
 Any files you delete with rclone will end up in the trash.  Microsoft
@@ -249,7 +286,7 @@ The entire path, including the file name, must contain fewer than 400 characters
 OneDrive seems to be OK with at least 50,000 files in a folder, but at
 100,000 rclone will get errors listing the directory like `couldn’t
 list files: UnknownError:`.  See
-[#2707](https://github.com/ncw/rclone/issues/2707) for more info.
+[#2707](https://github.com/rclone/rclone/issues/2707) for more info.
 
 An official document about the limitations for different types of OneDrive can be found [here](https://support.office.com/en-us/article/invalid-file-names-and-file-types-in-onedrive-onedrive-for-business-and-sharepoint-64883a5d-228e-48f5-b3d2-eb39e07630fa). 
 

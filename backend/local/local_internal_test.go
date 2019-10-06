@@ -1,6 +1,7 @@
 package local
 
 import (
+	"context"
 	"io/ioutil"
 	"os"
 	"path"
@@ -9,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ncw/rclone/fs"
-	"github.com/ncw/rclone/fs/config/configmap"
-	"github.com/ncw/rclone/fs/hash"
-	"github.com/ncw/rclone/fstest"
-	"github.com/ncw/rclone/lib/file"
-	"github.com/ncw/rclone/lib/readers"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fstest"
+	"github.com/rclone/rclone/lib/file"
+	"github.com/rclone/rclone/lib/readers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,19 +23,6 @@ import (
 // TestMain drives the tests
 func TestMain(m *testing.M) {
 	fstest.TestMain(m)
-}
-
-func TestMapper(t *testing.T) {
-	m := newMapper()
-	assert.Equal(t, m.m, map[string]string{})
-	assert.Equal(t, "potato", m.Save("potato", "potato"))
-	assert.Equal(t, m.m, map[string]string{})
-	assert.Equal(t, "-r'áö", m.Save("-r?'a´o¨", "-r'áö"))
-	assert.Equal(t, m.m, map[string]string{
-		"-r'áö": "-r?'a´o¨",
-	})
-	assert.Equal(t, "potato", m.Load("potato"))
-	assert.Equal(t, "-r?'a´o¨", m.Load("-r'áö"))
 }
 
 // Test copy with source file that's updating
@@ -56,7 +44,7 @@ func TestUpdatingCheck(t *testing.T) {
 	require.NoError(t, err)
 	o := &Object{size: fi.Size(), modTime: fi.ModTime(), fs: &Fs{}}
 	wrappedFd := readers.NewLimitedReadCloser(fd, -1)
-	hash, err := hash.NewMultiHasherTypes(hash.Supported)
+	hash, err := hash.NewMultiHasherTypes(hash.Supported())
 	require.NoError(t, err)
 	in := localOpenFile{
 		o:    o,
@@ -83,6 +71,7 @@ func TestUpdatingCheck(t *testing.T) {
 }
 
 func TestSymlink(t *testing.T) {
+	ctx := context.Background()
 	r := fstest.NewRun(t)
 	defer r.Finalise()
 	f := r.Flocal.(*Fs)
@@ -131,7 +120,7 @@ func TestSymlink(t *testing.T) {
 
 	// Create a symlink
 	modTime3 := fstest.Time("2002-03-03T04:05:10.123123123Z")
-	file3 := r.WriteObjectTo(r.Flocal, "symlink2.txt"+linkSuffix, "file.txt", modTime3, false)
+	file3 := r.WriteObjectTo(ctx, r.Flocal, "symlink2.txt"+linkSuffix, "file.txt", modTime3, false)
 	if runtime.GOOS == "windows" {
 		file3.Size = 0 // symlinks are 0 length under Windows
 	}
@@ -150,7 +139,7 @@ func TestSymlink(t *testing.T) {
 	assert.Equal(t, "file.txt", linkText)
 
 	// Check that NewObject gets the correct object
-	o, err := r.Flocal.NewObject("symlink2.txt" + linkSuffix)
+	o, err := r.Flocal.NewObject(ctx, "symlink2.txt"+linkSuffix)
 	require.NoError(t, err)
 	assert.Equal(t, "symlink2.txt"+linkSuffix, o.Remote())
 	if runtime.GOOS != "windows" {
@@ -158,11 +147,11 @@ func TestSymlink(t *testing.T) {
 	}
 
 	// Check that NewObject doesn't see the non suffixed version
-	_, err = r.Flocal.NewObject("symlink2.txt")
+	_, err = r.Flocal.NewObject(ctx, "symlink2.txt")
 	require.Equal(t, fs.ErrorObjectNotFound, err)
 
 	// Check reading the object
-	in, err := o.Open()
+	in, err := o.Open(ctx)
 	require.NoError(t, err)
 	contents, err := ioutil.ReadAll(in)
 	require.NoError(t, err)
@@ -170,7 +159,7 @@ func TestSymlink(t *testing.T) {
 	require.NoError(t, in.Close())
 
 	// Check reading the object with range
-	in, err = o.Open(&fs.RangeOption{Start: 2, End: 5})
+	in, err = o.Open(ctx, &fs.RangeOption{Start: 2, End: 5})
 	require.NoError(t, err)
 	contents, err = ioutil.ReadAll(in)
 	require.NoError(t, err)

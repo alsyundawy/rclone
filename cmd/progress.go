@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ncw/rclone/fs"
-	"github.com/ncw/rclone/fs/accounting"
-	"github.com/ncw/rclone/fs/log"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/accounting"
+	"github.com/rclone/rclone/fs/log"
 	"golang.org/x/crypto/ssh/terminal"
 )
 
@@ -23,10 +23,29 @@ const (
 	logTimeFormat = "2006-01-02 15:04:05"
 )
 
+var (
+	initTerminal    func() error
+	writeToTerminal func([]byte)
+)
+
+// Initialise the VT100 terminal
+func initTerminalVT100() error {
+	return nil
+}
+
+// Write to the VT100 terminal
+func writeToTerminalVT100(b []byte) {
+	_, _ = os.Stdout.Write(b)
+}
+
 // startProgress starts the progress bar printing
 //
 // It returns a func which should be called to stop the stats.
 func startProgress() func() {
+	if os.Getenv("TERM") != "" {
+		initTerminal = initTerminalVT100
+		writeToTerminal = writeToTerminalVT100
+	}
 	err := initTerminal()
 	if err != nil {
 		fs.Errorf(nil, "Failed to start progress: %v", err)
@@ -82,7 +101,7 @@ var (
 	progressMu sync.Mutex
 )
 
-// printProgress prings the progress with an optional log
+// printProgress prints the progress with an optional log
 func printProgress(logMessage string) {
 	progressMu.Lock()
 	defer progressMu.Unlock()
@@ -93,7 +112,7 @@ func printProgress(logMessage string) {
 		w, h = 80, 25
 	}
 	_ = h
-	stats := strings.TrimSpace(accounting.Stats.String())
+	stats := strings.TrimSpace(accounting.GlobalStats().String())
 	logMessage = strings.TrimSpace(logMessage)
 
 	out := func(s string) {

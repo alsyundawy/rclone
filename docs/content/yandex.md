@@ -9,8 +9,6 @@ date: "2015-12-30"
 
 [Yandex Disk](https://disk.yandex.com) is a cloud storage solution created by [Yandex](https://yandex.com).
 
-Yandex paths may be as deep as required, eg `remote:directory/subdirectory`.
-
 Here is an example of making a yandex configuration.  First run
 
     rclone config
@@ -25,33 +23,11 @@ n/s> n
 name> remote
 Type of storage to configure.
 Choose a number from below, or type in your own value
- 1 / Amazon Drive
-   \ "amazon cloud drive"
- 2 / Amazon S3 (also Dreamhost, Ceph, Minio)
-   \ "s3"
- 3 / Backblaze B2
-   \ "b2"
- 4 / Dropbox
-   \ "dropbox"
- 5 / Encrypt/Decrypt a remote
-   \ "crypt"
- 6 / Google Cloud Storage (this is not Google Drive)
-   \ "google cloud storage"
- 7 / Google Drive
-   \ "drive"
- 8 / Hubic
-   \ "hubic"
- 9 / Local Disk
-   \ "local"
-10 / Microsoft OneDrive
-   \ "onedrive"
-11 / Openstack Swift (Rackspace Cloud Files, Memset Memstore, OVH)
-   \ "swift"
-12 / SSH/SFTP Connection
-   \ "sftp"
-13 / Yandex Disk
+[snip]
+XX / Yandex Disk
    \ "yandex"
-Storage> 13
+[snip]
+Storage> yandex
 Yandex Client Id - leave blank normally.
 client_id>
 Yandex Client Secret - leave blank normally.
@@ -107,6 +83,8 @@ excess files in the path.
 
     rclone sync /home/local/directory remote:directory
 
+Yandex paths may be as deep as required, eg `remote:directory/subdirectory`.
+
 ### Modified time ###
 
 Modified times are supported and are stored accurate to 1 ns in custom
@@ -126,6 +104,14 @@ does not take any path arguments.
 
 To view your current quota you can use the `rclone about remote:`
 command which will display your usage limit (quota) and the current usage.
+
+#### Restricted filename characters
+
+The [default restricted characters set](/overview/#restricted-characters)
+are replaced.
+
+Invalid UTF-8 bytes will also be [replaced](/overview/#invalid-utf8),
+as they can't be used in JSON strings.
 
 ### Limitations ###
 
