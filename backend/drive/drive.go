@@ -10,6 +10,7 @@ package drive
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -213,7 +214,15 @@ func init() {
 			}},
 		}, {
 			Name: "root_folder_id",
-			Help: "ID of the root folder\nLeave blank normally.\nFill in to access \"Computers\" folders. (see docs).",
+			Help: `ID of the root folder
+Leave blank normally.
+
+Fill in to access "Computers" folders (see docs), or for rclone to use
+a non root folder as its starting point.
+
+Note that if this is blank, the first time rclone runs it will fill it
+in with the ID of the root folder.
+`,
 		}, {
 			Name: "service_account_file",
 			Help: "Service Account Credentials JSON file path \nLeave blank normally.\nNeeded only if you want use SA instead of interactive login.",
@@ -318,6 +327,17 @@ or move the photos locally and use the date the image was taken
 (created) set as the modification date.`,
 			Advanced: true,
 		}, {
+			Name:    "use_shared_date",
+			Default: false,
+			Help: `Use date file was shared instead of modified date.
+
+Note that, as with "--drive-use-created-date", this flag may have
+unexpected consequences when uploading/downloading files.
+
+If both this flag and "--drive-use-created-date" are set, the created
+date is used.`,
+			Advanced: true,
+		}, {
 			Name:     "list_chunk",
 			Default:  1000,
 			Help:     "Size of listing chunk 100-1000. 0 to disable.",
@@ -402,8 +422,22 @@ older versions that have been set to keep forever.`,
 
 This can be useful if you wish to do a server side copy between two
 different Google drives.  Note that this isn't enabled by default
-because it isn't easy to tell if it will work beween any two
+because it isn't easy to tell if it will work between any two
 configurations.`,
+			Advanced: true,
+		}, {
+			Name:    "disable_http2",
+			Default: true,
+			Help: `Disable drive using http2
+
+There is currently an unsolved issue with the google drive backend and
+HTTP/2.  HTTP/2 is therefore disabled by default for the drive backend
+but can be re-enabled here.  When the issue is solved this flag will
+be removed.
+
+See: https://github.com/rclone/rclone/issues/3631
+
+`,
 			Advanced: true,
 		}},
 	})
@@ -440,6 +474,7 @@ type Options struct {
 	ImportExtensions          string        `config:"import_formats"`
 	AllowImportNameChange     bool          `config:"allow_import_name_change"`
 	UseCreatedDate            bool          `config:"use_created_date"`
+	UseSharedDate             bool          `config:"use_shared_date"`
 	ListChunk                 int64         `config:"list_chunk"`
 	Impersonate               string        `config:"impersonate"`
 	AlternateExport           bool          `config:"alternate_export"`
@@ -452,6 +487,7 @@ type Options struct {
 	PacerMinSleep             fs.Duration   `config:"pacer_min_sleep"`
 	PacerBurst                int           `config:"pacer_burst"`
 	ServerSideAcrossConfigs   bool          `config:"server_side_across_configs"`
+	DisableHTTP2              bool          `config:"disable_http2"`
 }
 
 // Fs represents a remote drive server
@@ -565,6 +601,23 @@ func containsString(slice []string, s string) bool {
 	return false
 }
 
+// getRootID returns the canonical ID for the "root" ID
+func (f *Fs) getRootID() (string, error) {
+	var info *drive.File
+	var err error
+	err = f.pacer.CallNoRetry(func() (bool, error) {
+		info, err = f.svc.Files.Get("root").
+			Fields("id").
+			SupportsAllDrives(true).
+			Do()
+		return shouldRetry(err)
+	})
+	if err != nil {
+		return "", errors.Wrap(err, "couldn't find root directory ID")
+	}
+	return info.Id, nil
+}
+
 // Lists the directory required calling the user function on each item found
 //
 // If the user fn ever returns true then it early exits with found = true
@@ -652,6 +705,9 @@ func (f *Fs) list(ctx context.Context, dirIDs []string, title string, directorie
 
 	if f.opt.AuthOwnerOnly {
 		fields += ",owners"
+	}
+	if f.opt.UseSharedDate {
+		fields += ",sharedWithMeTime"
 	}
 	if f.opt.SkipChecksumGphotos {
 		fields += ",spaces"
@@ -789,7 +845,7 @@ func configTeamDrive(ctx context.Context, opt *Options, m configmap.Mapper, name
 	} else {
 		fmt.Printf("Change current team drive ID %q?\n", opt.TeamDriveID)
 	}
-	if !config.Confirm() {
+	if !config.Confirm(false) {
 		return nil
 	}
 	client, err := createOAuthClient(opt, name, m)
@@ -840,6 +896,18 @@ func newPacer(opt *Options) *fs.Pacer {
 	return fs.NewPacer(pacer.NewGoogleDrive(pacer.MinSleep(opt.PacerMinSleep), pacer.Burst(opt.PacerBurst)))
 }
 
+// getClient makes an http client according to the options
+func getClient(opt *Options) *http.Client {
+	t := fshttp.NewTransportCustom(fs.Config, func(t *http.Transport) {
+		if opt.DisableHTTP2 {
+			t.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		}
+	})
+	return &http.Client{
+		Transport: t,
+	}
+}
+
 func getServiceAccountClient(opt *Options, credentialsData []byte) (*http.Client, error) {
 	scopes := driveScopes(opt.Scope)
 	conf, err := google.JWTConfigFromJSON(credentialsData, scopes...)
@@ -849,7 +917,7 @@ func getServiceAccountClient(opt *Options, credentialsData []byte) (*http.Client
 	if opt.Impersonate != "" {
 		conf.Subject = opt.Impersonate
 	}
-	ctxWithSpecialClient := oauthutil.Context(fshttp.NewClient(fs.Config))
+	ctxWithSpecialClient := oauthutil.Context(getClient(opt))
 	return oauth2.NewClient(ctxWithSpecialClient, conf.TokenSource(ctxWithSpecialClient)), nil
 }
 
@@ -871,7 +939,7 @@ func createOAuthClient(opt *Options, name string, m configmap.Mapper) (*http.Cli
 			return nil, errors.Wrap(err, "failed to create oauth client from service account")
 		}
 	} else {
-		oAuthClient, _, err = oauthutil.NewClient(name, m, driveConfig)
+		oAuthClient, _, err = oauthutil.NewClientWithBaseClient(name, m, driveConfig, getClient(opt))
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to create oauth client")
 		}
@@ -968,15 +1036,25 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 	}
 
 	// set root folder for a team drive or query the user root folder
-	if f.isTeamDrive {
+	if opt.RootFolderID != "" {
+		// override root folder if set or cached in the config
+		f.rootFolderID = opt.RootFolderID
+	} else if f.isTeamDrive {
 		f.rootFolderID = f.opt.TeamDriveID
 	} else {
-		f.rootFolderID = "root"
-	}
-
-	// override root folder if set in the config
-	if opt.RootFolderID != "" {
-		f.rootFolderID = opt.RootFolderID
+		// Look up the root ID and cache it in the config
+		rootID, err := f.getRootID()
+		if err != nil {
+			if gerr, ok := errors.Cause(err).(*googleapi.Error); ok && gerr.Code == 404 {
+				// 404 means that this scope does not have permission to get the
+				// root so just use "root"
+				rootID = "root"
+			} else {
+				return nil, err
+			}
+		}
+		f.rootFolderID = rootID
+		m.Set("root_folder_id", rootID)
 	}
 
 	f.dirCache = dircache.New(root, f.rootFolderID, f)
@@ -1032,6 +1110,8 @@ func (f *Fs) newBaseObject(remote string, info *drive.File) baseObject {
 	modifiedDate := info.ModifiedTime
 	if f.opt.UseCreatedDate {
 		modifiedDate = info.CreatedTime
+	} else if f.opt.UseSharedDate && info.SharedWithMeTime != "" {
+		modifiedDate = info.SharedWithMeTime
 	}
 	size := info.Size
 	if f.opt.SizeAsQuota {
@@ -1400,6 +1480,14 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 	if iErr != nil {
 		return nil, iErr
 	}
+	// If listing the root of a teamdrive and got no entries,
+	// double check we have access
+	if f.isTeamDrive && len(entries) == 0 && f.root == "" && dir == "" {
+		err = f.teamDriveOK(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return entries, nil
 }
 
@@ -1459,10 +1547,22 @@ func (f *Fs) listRRunner(ctx context.Context, wg *sync.WaitGroup, in <-chan list
 		var iErr error
 		_, err := f.list(ctx, dirs, "", false, false, false, func(item *drive.File) bool {
 			for _, parent := range item.Parents {
-				// only handle parents that are in the requested dirs list
-				i := sort.SearchStrings(dirs, parent)
-				if i == len(dirs) || dirs[i] != parent {
-					continue
+				var i int
+				// If only one item in paths then no need to search for the ID
+				// assuming google drive is doing its job properly.
+				//
+				// Note that we at the root when len(paths) == 1 && paths[0] == ""
+				if len(paths) == 1 {
+					// don't check parents at root because
+					// - shared with me items have no parents at the root
+					// - if using a root alias, eg "root" or "appDataFolder" the ID won't match
+					i = 0
+				} else {
+					// only handle parents that are in the requested dirs list if not at root
+					i = sort.SearchStrings(dirs, parent)
+					if i == len(dirs) || dirs[i] != parent {
+						continue
+					}
 				}
 				remote := path.Join(paths[i], item.Name)
 				entry, err := f.itemToDirEntry(remote, item)
@@ -1526,20 +1626,6 @@ func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (
 	if err != nil {
 		return err
 	}
-	if directoryID == "root" {
-		var info *drive.File
-		err = f.pacer.CallNoRetry(func() (bool, error) {
-			info, err = f.svc.Files.Get("root").
-				Fields("id").
-				SupportsAllDrives(true).
-				Do()
-			return shouldRetry(err)
-		})
-		if err != nil {
-			return err
-		}
-		directoryID = info.Id
-	}
 
 	mu := sync.Mutex{} // protects in and overflow
 	wg := sync.WaitGroup{}
@@ -1547,6 +1633,7 @@ func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (
 	out := make(chan error, fs.Config.Checkers)
 	list := walk.NewListRHelper(callback)
 	overflow := []listREntry{}
+	listed := 0
 
 	cb := func(entry fs.DirEntry) error {
 		mu.Lock()
@@ -1559,6 +1646,7 @@ func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (
 				overflow = append(overflow, listREntry{d.ID(), d.Remote()})
 			}
 		}
+		listed++
 		return list.Add(entry)
 	}
 
@@ -1615,7 +1703,21 @@ func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (
 		return err
 	}
 
-	return list.Flush()
+	err = list.Flush()
+	if err != nil {
+		return err
+	}
+
+	// If listing the root of a teamdrive and got no entries,
+	// double check we have access
+	if f.isTeamDrive && listed == 0 && f.root == "" && dir == "" {
+		err = f.teamDriveOK(ctx)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // itemToDirEntry converts a drive.File to a fs.DirEntry.
@@ -1988,9 +2090,30 @@ func (f *Fs) CleanUp(ctx context.Context) error {
 	return nil
 }
 
+// teamDriveOK checks to see if we can access the team drive
+func (f *Fs) teamDriveOK(ctx context.Context) (err error) {
+	if !f.isTeamDrive {
+		return nil
+	}
+	var td *drive.Drive
+	err = f.pacer.Call(func() (bool, error) {
+		td, err = f.svc.Drives.Get(f.opt.TeamDriveID).Fields("name,id,capabilities,createdTime,restrictions").Context(ctx).Do()
+		return shouldRetry(err)
+	})
+	if err != nil {
+		return errors.Wrap(err, "failed to get Team/Shared Drive info")
+	}
+	fs.Debugf(f, "read info from team drive %q", td.Name)
+	return err
+}
+
 // About gets quota information
 func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
 	if f.isTeamDrive {
+		err := f.teamDriveOK(ctx)
+		if err != nil {
+			return nil, err
+		}
 		// Teamdrives don't appear to have a usage API so just return empty
 		return &fs.Usage{}, nil
 	}
@@ -2267,9 +2390,11 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 func (f *Fs) changeNotifyStartPageToken() (pageToken string, err error) {
 	var startPageToken *drive.StartPageToken
 	err = f.pacer.Call(func() (bool, error) {
-		startPageToken, err = f.svc.Changes.GetStartPageToken().
-			SupportsAllDrives(true).
-			Do()
+		changes := f.svc.Changes.GetStartPageToken().SupportsAllDrives(true)
+		if f.isTeamDrive {
+			changes.DriveId(f.opt.TeamDriveID)
+		}
+		startPageToken, err = changes.Do()
 		return shouldRetry(err)
 	})
 	if err != nil {
@@ -2292,7 +2417,11 @@ func (f *Fs) changeNotifyRunner(ctx context.Context, notifyFunc func(string, fs.
 			changesCall.SupportsAllDrives(true)
 			changesCall.IncludeItemsFromAllDrives(true)
 			if f.isTeamDrive {
-				changesCall.TeamDriveId(f.opt.TeamDriveID)
+				changesCall.DriveId(f.opt.TeamDriveID)
+			}
+			// If using appDataFolder then need to add Spaces
+			if f.rootFolderID == "appDataFolder" {
+				changesCall.Spaces("appDataFolder")
 			}
 			changeList, err = changesCall.Context(ctx).Do()
 			return shouldRetry(err)

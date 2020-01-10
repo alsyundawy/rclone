@@ -37,7 +37,7 @@ See the following for detailed instructions for
   * [Google Photos](/googlephotos/)
   * [HTTP](/http/)
   * [Hubic](/hubic/)
-  * [Jottacloud](/jottacloud/)
+  * [Jottacloud / GetSky.no](/jottacloud/)
   * [Koofr](/koofr/)
   * [Mail.ru Cloud](/mailru/)
   * [Mega](/mega/)
@@ -770,6 +770,23 @@ in effect (the defaults):
 - 500MB..750MB files will be downloaded with 3 streams
 - 750MB+ files will be downloaded with 4 streams
 
+### --no-check-dest ###
+
+The `--no-check-dest` can be used with `move` or `copy` and it causes
+rclone not to check the destination at all when copying files.
+
+This means that:
+
+- the destination is not listed minimising the API calls
+- files are always transferred
+- this can cause duplicates on remotes which allow it (eg Google Drive)
+- `--retries 1` is recommended otherwise you'll transfer everything again on a retry
+
+This flag is useful to minimise the transactions if you know that none
+of the files are on the destination.
+
+This is a specialized flag which should be ignored by most users!
+
 ### --no-gzip-encoding ###
 
 Don't set `Accept-Encoding: gzip`.  This means that rclone won't ask
@@ -1098,20 +1115,24 @@ The default is to run 4 file transfers in parallel.
 This forces rclone to skip any files which exist on the destination
 and have a modified time that is newer than the source file.
 
+This can be useful when transferring to a remote which doesn't support
+mod times directly (or when using `--use-server-modtime` to avoid extra
+API calls) as it is more accurate than a `--size-only` check and faster
+than using `--checksum`.
+
 If an existing destination file has a modification time equal (within
 the computed modify window precision) to the source file's, it will be
-updated if the sizes are different.
+updated if the sizes are different.  If `--checksum` is set then
+rclone will update the destination if the checksums differ too.
+
+If an existing destination file is older than the source file then
+it will be updated if the size or checksum differs from the source file.
 
 On remotes which don't support mod time directly (or when using
-`--use-server-mod-time`) the time checked will be the uploaded time.
+`--use-server-modtime`) the time checked will be the uploaded time.
 This means that if uploading to one of these remotes, rclone will skip
 any files which exist on the destination and have an uploaded time that
 is newer than the modification time of the source file.
-
-This can be useful when transferring to a remote which doesn't support
-mod times directly (or when using `--use-server-mod-time` to avoid extra
-API calls) as it is more accurate than a `--size-only` check and faster
-than using `--checksum`.
 
 ### --use-mmap ###
 

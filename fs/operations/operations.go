@@ -63,7 +63,7 @@ func checkHashes(ctx context.Context, src fs.ObjectInfo, dst fs.Object, ht hash.
 	g.Go(func() (err error) {
 		srcHash, err = src.Hash(ctx, ht)
 		if err != nil {
-			fs.CountError(err)
+			err = fs.CountError(err)
 			fs.Errorf(src, "Failed to calculate src hash: %v", err)
 		}
 		return err
@@ -71,7 +71,7 @@ func checkHashes(ctx context.Context, src fs.ObjectInfo, dst fs.Object, ht hash.
 	g.Go(func() (err error) {
 		dstHash, err = dst.Hash(ctx, ht)
 		if err != nil {
-			fs.CountError(err)
+			err = fs.CountError(err)
 			fs.Errorf(dst, "Failed to calculate dst hash: %v", err)
 		}
 		return err
@@ -114,7 +114,7 @@ func checkHashes(ctx context.Context, src fs.ObjectInfo, dst fs.Object, ht hash.
 // Otherwise the file is considered to be not equal including if there
 // were errors reading info.
 func Equal(ctx context.Context, src fs.ObjectInfo, dst fs.Object) bool {
-	return equal(ctx, src, dst, fs.Config.SizeOnly, fs.Config.CheckSum, !fs.Config.NoUpdateModTime)
+	return equal(ctx, src, dst, defaultEqualOpt())
 }
 
 // sizeDiffers compare the size of src and dst taking into account the
@@ -128,12 +128,30 @@ func sizeDiffers(src, dst fs.ObjectInfo) bool {
 
 var checksumWarning sync.Once
 
-func equal(ctx context.Context, src fs.ObjectInfo, dst fs.Object, sizeOnly, checkSum, UpdateModTime bool) bool {
+// options for equal function()
+type equalOpt struct {
+	sizeOnly          bool // if set only check size
+	checkSum          bool // if set check checksum+size instead of modtime+size
+	updateModTime     bool // if set update the modtime if hashes identical and checking with modtime+size
+	forceModTimeMatch bool // if set assume modtimes match
+}
+
+// default set of options for equal()
+func defaultEqualOpt() equalOpt {
+	return equalOpt{
+		sizeOnly:          fs.Config.SizeOnly,
+		checkSum:          fs.Config.CheckSum,
+		updateModTime:     !fs.Config.NoUpdateModTime,
+		forceModTimeMatch: false,
+	}
+}
+
+func equal(ctx context.Context, src fs.ObjectInfo, dst fs.Object, opt equalOpt) bool {
 	if sizeDiffers(src, dst) {
 		fs.Debugf(src, "Sizes differ (src %d vs dst %d)", src.Size(), dst.Size())
 		return false
 	}
-	if sizeOnly {
+	if opt.sizeOnly {
 		fs.Debugf(src, "Sizes identical")
 		return true
 	}
@@ -141,7 +159,7 @@ func equal(ctx context.Context, src fs.ObjectInfo, dst fs.Object, sizeOnly, chec
 	// Assert: Size is equal or being ignored
 
 	// If checking checksum and not modtime
-	if checkSum {
+	if opt.checkSum {
 		// Check the hash
 		same, ht, _ := CheckHashes(ctx, src, dst)
 		if !same {
@@ -159,21 +177,23 @@ func equal(ctx context.Context, src fs.ObjectInfo, dst fs.Object, sizeOnly, chec
 		return true
 	}
 
-	// Sizes the same so check the mtime
-	modifyWindow := fs.GetModifyWindow(src.Fs(), dst.Fs())
-	if modifyWindow == fs.ModTimeNotSupported {
-		fs.Debugf(src, "Sizes identical")
-		return true
-	}
 	srcModTime := src.ModTime(ctx)
-	dstModTime := dst.ModTime(ctx)
-	dt := dstModTime.Sub(srcModTime)
-	if dt < modifyWindow && dt > -modifyWindow {
-		fs.Debugf(src, "Size and modification time the same (differ by %s, within tolerance %s)", dt, modifyWindow)
-		return true
-	}
+	if !opt.forceModTimeMatch {
+		// Sizes the same so check the mtime
+		modifyWindow := fs.GetModifyWindow(src.Fs(), dst.Fs())
+		if modifyWindow == fs.ModTimeNotSupported {
+			fs.Debugf(src, "Sizes identical")
+			return true
+		}
+		dstModTime := dst.ModTime(ctx)
+		dt := dstModTime.Sub(srcModTime)
+		if dt < modifyWindow && dt > -modifyWindow {
+			fs.Debugf(src, "Size and modification time the same (differ by %s, within tolerance %s)", dt, modifyWindow)
+			return true
+		}
 
-	fs.Debugf(src, "Modification times differ by %s: %v, %v", dt, srcModTime, dstModTime)
+		fs.Debugf(src, "Modification times differ by %s: %v, %v", dt, srcModTime, dstModTime)
+	}
 
 	// Check if the hashes are the same
 	same, ht, _ := CheckHashes(ctx, src, dst)
@@ -187,7 +207,7 @@ func equal(ctx context.Context, src fs.ObjectInfo, dst fs.Object, sizeOnly, chec
 	}
 
 	// mod time differs but hash is the same to reset mod time if required
-	if UpdateModTime {
+	if opt.updateModTime {
 		if fs.Config.DryRun {
 			fs.Logf(src, "Not updating modification time as --dry-run")
 		} else {
@@ -214,7 +234,7 @@ func equal(ctx context.Context, src fs.ObjectInfo, dst fs.Object, sizeOnly, chec
 				}
 				return false
 			} else if err != nil {
-				fs.CountError(err)
+				err = fs.CountError(err)
 				fs.Errorf(dst, "Failed to set modification time: %v", err)
 			} else {
 				fs.Infof(src, "Updated modification time in destination")
@@ -382,13 +402,14 @@ func Copy(ctx context.Context, f fs.Fs, dst fs.Object, remote string, src fs.Obj
 		// Retry if err returned a retry error
 		if fserrors.IsRetryError(err) || fserrors.ShouldRetry(err) {
 			fs.Debugf(src, "Received error: %v - low level retry %d/%d", err, tries, maxTries)
+			tr.Reset() // skip incomplete accounting - will be overwritten by retry
 			continue
 		}
 		// otherwise finish
 		break
 	}
 	if err != nil {
-		fs.CountError(err)
+		err = fs.CountError(err)
 		fs.Errorf(src, "Failed to copy: %v", err)
 		return newDst, err
 	}
@@ -397,7 +418,7 @@ func Copy(ctx context.Context, f fs.Fs, dst fs.Object, remote string, src fs.Obj
 	if sizeDiffers(src, dst) {
 		err = errors.Errorf("corrupted on transfer: sizes differ %d vs %d", src.Size(), dst.Size())
 		fs.Errorf(dst, "%v", err)
-		fs.CountError(err)
+		err = fs.CountError(err)
 		removeFailedCopy(ctx, dst)
 		return newDst, err
 	}
@@ -409,7 +430,7 @@ func Copy(ctx context.Context, f fs.Fs, dst fs.Object, remote string, src fs.Obj
 		if !equal {
 			err = errors.Errorf("corrupted on transfer: %v hash differ %q vs %q", hashType, srcSum, dstSum)
 			fs.Errorf(dst, "%v", err)
-			fs.CountError(err)
+			err = fs.CountError(err)
 			removeFailedCopy(ctx, dst)
 			return newDst, err
 		}
@@ -472,7 +493,7 @@ func Move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
 		case fs.ErrorCantMove:
 			fs.Debugf(src, "Can't move, switching to copy")
 		default:
-			fs.CountError(err)
+			err = fs.CountError(err)
 			fs.Errorf(src, "Couldn't move: %v", err)
 			return newDst, err
 		}
@@ -538,8 +559,8 @@ func DeleteFileWithBackupDir(ctx context.Context, dst fs.Object, backupDir fs.Fs
 		err = dst.Remove(ctx)
 	}
 	if err != nil {
-		fs.CountError(err)
 		fs.Errorf(dst, "Couldn't %s: %v", action, err)
+		err = fs.CountError(err)
 	} else if !fs.Config.DryRun {
 		fs.Infof(dst, actioned)
 	}
@@ -665,7 +686,7 @@ func checkIdentical(ctx context.Context, dst, src fs.Object) (differ bool, noHas
 	if !same {
 		err = errors.Errorf("%v differ", ht)
 		fs.Errorf(src, "%v", err)
-		fs.CountError(err)
+		_ = fs.CountError(err)
 		return true, false
 	}
 	return false, false
@@ -696,11 +717,14 @@ func (c *checkMarch) DstOnly(dst fs.DirEntry) (recurse bool) {
 		}
 		err := errors.Errorf("File not in %v", c.fsrc)
 		fs.Errorf(dst, "%v", err)
-		fs.CountError(err)
+		_ = fs.CountError(err)
 		atomic.AddInt32(&c.differences, 1)
 		atomic.AddInt32(&c.srcFilesMissing, 1)
 	case fs.Directory:
 		// Do the same thing to the entire contents of the directory
+		if c.oneway {
+			return false
+		}
 		return true
 	default:
 		panic("Bad object in DirEntries")
@@ -714,7 +738,7 @@ func (c *checkMarch) SrcOnly(src fs.DirEntry) (recurse bool) {
 	case fs.Object:
 		err := errors.Errorf("File not in %v", c.fdst)
 		fs.Errorf(src, "%v", err)
-		fs.CountError(err)
+		_ = fs.CountError(err)
 		atomic.AddInt32(&c.differences, 1)
 		atomic.AddInt32(&c.dstFilesMissing, 1)
 	case fs.Directory:
@@ -736,7 +760,6 @@ func (c *checkMarch) checkIdentical(ctx context.Context, dst, src fs.Object) (di
 	if sizeDiffers(src, dst) {
 		err = errors.Errorf("Sizes differ")
 		fs.Errorf(src, "%v", err)
-		fs.CountError(err)
 		return true, false
 	}
 	if fs.Config.SizeOnly {
@@ -756,15 +779,17 @@ func (c *checkMarch) Match(ctx context.Context, dst, src fs.DirEntry) (recurse b
 				atomic.AddInt32(&c.differences, 1)
 			} else {
 				atomic.AddInt32(&c.matches, 1)
-				fs.Debugf(dstX, "OK")
-			}
-			if noHash {
-				atomic.AddInt32(&c.noHashes, 1)
+				if noHash {
+					atomic.AddInt32(&c.noHashes, 1)
+					fs.Debugf(dstX, "OK - could not check hash")
+				} else {
+					fs.Debugf(dstX, "OK")
+				}
 			}
 		} else {
 			err := errors.Errorf("is file on %v but directory on %v", c.fsrc, c.fdst)
 			fs.Errorf(src, "%v", err)
-			fs.CountError(err)
+			_ = fs.CountError(err)
 			atomic.AddInt32(&c.differences, 1)
 			atomic.AddInt32(&c.dstFilesMissing, 1)
 		}
@@ -776,7 +801,7 @@ func (c *checkMarch) Match(ctx context.Context, dst, src fs.DirEntry) (recurse b
 		}
 		err := errors.Errorf("is file on %v but directory on %v", c.fdst, c.fsrc)
 		fs.Errorf(dst, "%v", err)
-		fs.CountError(err)
+		_ = fs.CountError(err)
 		atomic.AddInt32(&c.differences, 1)
 		atomic.AddInt32(&c.srcFilesMissing, 1)
 
@@ -903,7 +928,7 @@ func CheckDownload(ctx context.Context, fdst, fsrc fs.Fs, oneway bool) error {
 	check := func(ctx context.Context, a, b fs.Object) (differ bool, noHash bool) {
 		differ, err := CheckIdentical(ctx, a, b)
 		if err != nil {
-			fs.CountError(err)
+			err = fs.CountError(err)
 			fs.Errorf(a, "Failed to download: %v", err)
 			return true, true
 		}
@@ -1050,7 +1075,7 @@ func Mkdir(ctx context.Context, f fs.Fs, dir string) error {
 	fs.Debugf(fs.LogDirName(f, dir), "Making directory")
 	err := f.Mkdir(ctx, dir)
 	if err != nil {
-		fs.CountError(err)
+		err = fs.CountError(err)
 		return err
 	}
 	return nil
@@ -1071,7 +1096,7 @@ func TryRmdir(ctx context.Context, f fs.Fs, dir string) error {
 func Rmdir(ctx context.Context, f fs.Fs, dir string) error {
 	err := TryRmdir(ctx, f, dir)
 	if err != nil {
-		fs.CountError(err)
+		err = fs.CountError(err)
 		return err
 	}
 	return err
@@ -1104,7 +1129,7 @@ func Purge(ctx context.Context, f fs.Fs, dir string) error {
 		err = Rmdirs(ctx, f, dir, false)
 	}
 	if err != nil {
-		fs.CountError(err)
+		err = fs.CountError(err)
 		return err
 	}
 	return nil
@@ -1147,7 +1172,7 @@ func listToChan(ctx context.Context, f fs.Fs, dir string) fs.ObjectsChan {
 		})
 		if err != nil && err != fs.ErrorDirNotFound {
 			err = errors.Wrap(err, "failed to list")
-			fs.CountError(err)
+			err = fs.CountError(err)
 			fs.Errorf(nil, "%v", err)
 		}
 	}()
@@ -1203,7 +1228,7 @@ func Cat(ctx context.Context, f fs.Fs, w io.Writer, offset, count int64) error {
 		}
 		in, err := o.Open(ctx, options...)
 		if err != nil {
-			fs.CountError(err)
+			err = fs.CountError(err)
 			fs.Errorf(o, "Failed to open: %v", err)
 			return
 		}
@@ -1216,7 +1241,7 @@ func Cat(ctx context.Context, f fs.Fs, w io.Writer, offset, count int64) error {
 		defer mu.Unlock()
 		_, err = io.Copy(w, in)
 		if err != nil {
-			fs.CountError(err)
+			err = fs.CountError(err)
 			fs.Errorf(o, "Failed to send to output: %v", err)
 		}
 	})
@@ -1243,7 +1268,7 @@ func Rcat(ctx context.Context, fdst fs.Fs, dstFileName string, in io.ReadCloser,
 		src := object.NewStaticObjectInfo(dstFileName, modTime, int64(readCounter.BytesRead()), false, hash.Sums(), fdst)
 		if !Equal(ctx, src, dst) {
 			err = errors.Errorf("corrupted on transfer")
-			fs.CountError(err)
+			err = fs.CountError(err)
 			fs.Errorf(dst, "%v", err)
 			return err
 		}
@@ -1318,7 +1343,7 @@ func Rmdirs(ctx context.Context, f fs.Fs, dir string, leaveRoot bool) error {
 	dirEmpty[dir] = !leaveRoot
 	err := walk.Walk(ctx, f, dir, true, fs.Config.MaxDepth, func(dirPath string, entries fs.DirEntries, err error) error {
 		if err != nil {
-			fs.CountError(err)
+			err = fs.CountError(err)
 			fs.Errorf(f, "Failed to list %q: %v", dirPath, err)
 			return nil
 		}
@@ -1365,7 +1390,7 @@ func Rmdirs(ctx context.Context, f fs.Fs, dir string, leaveRoot bool) error {
 		dir := toDelete[i]
 		err := TryRmdir(ctx, f, dir)
 		if err != nil {
-			fs.CountError(err)
+			err = fs.CountError(err)
 			fs.Errorf(dir, "Failed to rmdir: %v", err)
 			return err
 		}
@@ -1444,7 +1469,9 @@ func copyDest(ctx context.Context, fdst fs.Fs, dst, src fs.Object, CopyDest, bac
 	default:
 		return false, err
 	}
-	if equal(ctx, src, CopyDestFile, fs.Config.SizeOnly, fs.Config.CheckSum, false) {
+	opt := defaultEqualOpt()
+	opt.updateModTime = false
+	if equal(ctx, src, CopyDestFile, opt) {
 		if dst == nil || !Equal(ctx, src, dst) {
 			if dst != nil && backupDir != nil {
 				err = MoveBackupDir(ctx, backupDir, dst)
@@ -1489,7 +1516,7 @@ func CompareOrCopyDest(ctx context.Context, fdst fs.Fs, dst, src fs.Object, Comp
 // transferred or not.
 func NeedTransfer(ctx context.Context, dst, src fs.Object) bool {
 	if dst == nil {
-		fs.Debugf(src, "Couldn't find file - need to transfer")
+		fs.Debugf(src, "Need to transfer - File not found at Destination")
 		return true
 	}
 	// If we should ignore existing files, don't transfer
@@ -1520,13 +1547,22 @@ func NeedTransfer(ctx context.Context, dst, src fs.Object) bool {
 			fs.Debugf(src, "Destination is newer than source, skipping")
 			return false
 		case dt <= -modifyWindow:
-			fs.Debugf(src, "Destination is older than source, transferring")
-		default:
-			if !sizeDiffers(src, dst) {
-				fs.Debugf(src, "Destination mod time is within %v of source and sizes identical, skipping", modifyWindow)
+			// force --checksum on for the check and do update modtimes by default
+			opt := defaultEqualOpt()
+			opt.forceModTimeMatch = true
+			if equal(ctx, src, dst, opt) {
+				fs.Debugf(src, "Unchanged skipping")
 				return false
 			}
-			fs.Debugf(src, "Destination mod time is within %v of source but sizes differ, transferring", modifyWindow)
+		default:
+			// Do a size only compare unless --checksum is set
+			opt := defaultEqualOpt()
+			opt.sizeOnly = !fs.Config.CheckSum
+			if equal(ctx, src, dst, opt) {
+				fs.Debugf(src, "Destination mod time is within %v of source and files identical, skipping", modifyWindow)
+				return false
+			}
+			fs.Debugf(src, "Destination mod time is within %v of source but files differ, transferring", modifyWindow)
 		}
 	} else {
 		// Check to see if changed or not
@@ -1672,11 +1708,14 @@ func moveOrCopyFile(ctx context.Context, fdst fs.Fs, fsrc fs.Fs, dstFileName str
 	}
 
 	// Find dst object if it exists
-	dstObj, err := fdst.NewObject(ctx, dstFileName)
-	if err == fs.ErrorObjectNotFound {
-		dstObj = nil
-	} else if err != nil {
-		return err
+	var dstObj fs.Object
+	if !fs.Config.NoCheckDest {
+		dstObj, err = fdst.NewObject(ctx, dstFileName)
+		if err == fs.ErrorObjectNotFound {
+			dstObj = nil
+		} else if err != nil {
+			return err
+		}
 	}
 
 	// Special case for changing case of a file on a case insensitive remote

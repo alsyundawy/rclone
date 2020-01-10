@@ -350,7 +350,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 		err = errors.Wrapf(err, "failed to open directory %q", dir)
 		fs.Errorf(dir, "%v", err)
 		if isPerm {
-			accounting.Stats(ctx).Error(fserrors.NoRetryError(err))
+			_ = accounting.Stats(ctx).Error(fserrors.NoRetryError(err))
 			err = nil // ignore error but fail sync
 		}
 		return nil, err
@@ -386,7 +386,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 					if fierr != nil {
 						err = errors.Wrapf(err, "failed to read directory %q", namepath)
 						fs.Errorf(dir, "%v", fierr)
-						accounting.Stats(ctx).Error(fserrors.NoRetryError(fierr)) // fail the sync
+						_ = accounting.Stats(ctx).Error(fserrors.NoRetryError(fierr)) // fail the sync
 						continue
 					}
 					fis = append(fis, fi)
@@ -409,7 +409,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 					// Skip bad symlinks
 					err = fserrors.NoRetryError(errors.Wrap(err, "symlink"))
 					fs.Errorf(newRemote, "Listing error: %v", err)
-					accounting.Stats(ctx).Error(err)
+					err = accounting.Stats(ctx).Error(err)
 					continue
 				}
 				if err != nil {
@@ -820,10 +820,10 @@ func (file *localOpenFile) Read(p []byte) (n int, err error) {
 			return 0, errors.Wrap(err, "can't read status of source file while transferring")
 		}
 		if file.o.size != fi.Size() {
-			return 0, errors.Errorf("can't copy - source file is being updated (size changed from %d to %d)", file.o.size, fi.Size())
+			return 0, fserrors.NoLowLevelRetryError(errors.Errorf("can't copy - source file is being updated (size changed from %d to %d)", file.o.size, fi.Size()))
 		}
 		if !file.o.modTime.Equal(fi.ModTime()) {
-			return 0, errors.Errorf("can't copy - source file is being updated (mod time changed from %v to %v)", file.o.modTime, fi.ModTime())
+			return 0, fserrors.NoLowLevelRetryError(errors.Errorf("can't copy - source file is being updated (mod time changed from %v to %v)", file.o.modTime, fi.ModTime()))
 		}
 	}
 
@@ -956,7 +956,17 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	if !o.translatedLink {
 		f, err := file.OpenFile(o.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
 		if err != nil {
-			return err
+			if runtime.GOOS == "windows" && os.IsPermission(err) {
+				// If permission denied on Windows might be trying to update a
+				// hidden file, in which case try opening without CREATE
+				// See: https://stackoverflow.com/questions/13215716/ioerror-errno-13-permission-denied-when-trying-to-open-hidden-file-in-w-mod
+				f, err = file.OpenFile(o.path, os.O_WRONLY|os.O_TRUNC, 0666)
+				if err != nil {
+					return err
+				}
+			} else {
+				return err
+			}
 		}
 		// Pre-allocate the file for performance reasons
 		err = preAllocate(src.Size(), f)
@@ -1084,17 +1094,17 @@ func (o *Object) Remove(ctx context.Context) error {
 
 func cleanRootPath(s string, noUNC bool) string {
 	if runtime.GOOS == "windows" {
-		s = filepath.ToSlash(s)
-		vol := filepath.VolumeName(s)
-		s = vol + enc.FromStandardPath(s[len(vol):])
-		s = filepath.FromSlash(s)
-
 		if !filepath.IsAbs(s) && !strings.HasPrefix(s, "\\") {
 			s2, err := filepath.Abs(s)
 			if err == nil {
 				s = s2
 			}
 		}
+		s = filepath.ToSlash(s)
+		vol := filepath.VolumeName(s)
+		s = vol + enc.FromStandardPath(s[len(vol):])
+		s = filepath.FromSlash(s)
+
 		if !noUNC {
 			// Convert to UNC
 			s = uncPath(s)

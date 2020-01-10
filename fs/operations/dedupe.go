@@ -15,7 +15,6 @@ import (
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/walk"
-	"github.com/spf13/pflag"
 )
 
 // dedupeRename renames the objs slice to different names
@@ -34,7 +33,7 @@ outer:
 		_, err := f.NewObject(ctx, newName)
 		for ; err != fs.ErrorObjectNotFound; suffix++ {
 			if err != nil {
-				fs.CountError(err)
+				err = fs.CountError(err)
 				fs.Errorf(o, "Failed to check for existing object: %v", err)
 				continue outer
 			}
@@ -48,7 +47,7 @@ outer:
 		if !fs.Config.DryRun {
 			newObj, err := doMove(ctx, o, newName)
 			if err != nil {
-				fs.CountError(err)
+				err = fs.CountError(err)
 				fs.Errorf(o, "Failed to rename: %v", err)
 				continue
 			}
@@ -61,13 +60,19 @@ outer:
 
 // dedupeDeleteAllButOne deletes all but the one in keep
 func dedupeDeleteAllButOne(ctx context.Context, keep int, remote string, objs []fs.Object) {
+	count := 0
 	for i, o := range objs {
 		if i == keep {
 			continue
 		}
-		_ = DeleteFile(ctx, o)
+		err := DeleteFile(ctx, o)
+		if err == nil {
+			count++
+		}
 	}
-	fs.Logf(remote, "Deleted %d extra copies", len(objs)-1)
+	if count > 0 {
+		fs.Logf(remote, "Deleted %d extra copies", count)
+	}
 }
 
 // dedupeDeleteIdentical deletes all but one of identical (by hash) copies
@@ -85,13 +90,16 @@ func dedupeDeleteIdentical(ctx context.Context, ht hash.Type, remote string, obj
 
 	// Delete identical duplicates, filling remainingObjs with the ones remaining
 	for md5sum, hashObjs := range byHash {
+		remainingObjs = append(remainingObjs, hashObjs[0])
 		if len(hashObjs) > 1 {
 			fs.Logf(remote, "Deleting %d/%d identical duplicates (%v %q)", len(hashObjs)-1, len(hashObjs), ht, md5sum)
 			for _, o := range hashObjs[1:] {
-				_ = DeleteFile(ctx, o)
+				err := DeleteFile(ctx, o)
+				if err != nil {
+					remainingObjs = append(remainingObjs, o)
+				}
 			}
 		}
-		remainingObjs = append(remainingObjs, hashObjs[0])
 	}
 
 	return remainingObjs
@@ -187,9 +195,6 @@ func (x *DeduplicateMode) Type() string {
 	return "string"
 }
 
-// Check it satisfies the interface
-var _ pflag.Value = (*DeduplicateMode)(nil)
-
 // dedupeFindDuplicateDirs scans f for duplicate directories
 func dedupeFindDuplicateDirs(ctx context.Context, f fs.Fs) ([][]fs.Directory, error) {
 	dirs := map[string][]fs.Directory{}
@@ -202,11 +207,17 @@ func dedupeFindDuplicateDirs(ctx context.Context, f fs.Fs) ([][]fs.Directory, er
 	if err != nil {
 		return nil, errors.Wrap(err, "find duplicate dirs")
 	}
-	duplicateDirs := [][]fs.Directory{}
-	for _, ds := range dirs {
+	// make sure parents are before children
+	duplicateNames := []string{}
+	for name, ds := range dirs {
 		if len(ds) > 1 {
-			duplicateDirs = append(duplicateDirs, ds)
+			duplicateNames = append(duplicateNames, name)
 		}
+	}
+	sort.Strings(duplicateNames)
+	duplicateDirs := [][]fs.Directory{}
+	for _, name := range duplicateNames {
+		duplicateDirs = append(duplicateDirs, dirs[name])
 	}
 	return duplicateDirs, nil
 }
@@ -226,7 +237,8 @@ func dedupeMergeDuplicateDirs(ctx context.Context, f fs.Fs, duplicateDirs [][]fs
 			fs.Infof(dirs[0], "Merging contents of duplicate directories")
 			err := mergeDirs(ctx, dirs)
 			if err != nil {
-				return errors.Wrap(err, "merge duplicate dirs")
+				err = fs.CountError(err)
+				fs.Errorf(nil, "merge duplicate dirs: %v", err)
 			}
 		} else {
 			fs.Infof(dirs[0], "NOT Merging contents of duplicate directories as --dry-run")
@@ -242,22 +254,15 @@ func dedupeMergeDuplicateDirs(ctx context.Context, f fs.Fs, duplicateDirs [][]fs
 func Deduplicate(ctx context.Context, f fs.Fs, mode DeduplicateMode) error {
 	fs.Infof(f, "Looking for duplicates using %v mode.", mode)
 
-	// Find duplicate directories first and fix them - repeat
-	// until all fixed
-	for {
-		duplicateDirs, err := dedupeFindDuplicateDirs(ctx, f)
-		if err != nil {
-			return err
-		}
-		if len(duplicateDirs) == 0 {
-			break
-		}
+	// Find duplicate directories first and fix them
+	duplicateDirs, err := dedupeFindDuplicateDirs(ctx, f)
+	if err != nil {
+		return err
+	}
+	if len(duplicateDirs) != 0 {
 		err = dedupeMergeDuplicateDirs(ctx, f, duplicateDirs)
 		if err != nil {
 			return err
-		}
-		if fs.Config.DryRun {
-			break
 		}
 	}
 
@@ -266,7 +271,7 @@ func Deduplicate(ctx context.Context, f fs.Fs, mode DeduplicateMode) error {
 
 	// Now find duplicate files
 	files := map[string][]fs.Object{}
-	err := walk.ListR(ctx, f, "", true, fs.Config.MaxDepth, walk.ListObjects, func(entries fs.DirEntries) error {
+	err = walk.ListR(ctx, f, "", true, fs.Config.MaxDepth, walk.ListObjects, func(entries fs.DirEntries) error {
 		entries.ForObject(func(o fs.Object) {
 			remote := o.Remote()
 			files[remote] = append(files[remote], o)

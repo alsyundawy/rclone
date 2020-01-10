@@ -490,7 +490,7 @@ func TestSyncIgnoreErrors(t *testing.T) {
 	)
 
 	accounting.GlobalStats().ResetCounters()
-	fs.CountError(errors.New("boom"))
+	_ = fs.CountError(errors.New("boom"))
 	assert.NoError(t, Sync(context.Background(), r.Fremote, r.Flocal, false))
 
 	fstest.CheckListingWithPrecision(
@@ -800,7 +800,7 @@ func TestSyncAfterRemovingAFileAndAddingAFileSubDirWithErrors(t *testing.T) {
 	)
 
 	accounting.GlobalStats().ResetCounters()
-	fs.CountError(errors.New("boom"))
+	_ = fs.CountError(errors.New("boom"))
 	err := Sync(context.Background(), r.Fremote, r.Flocal, false)
 	assert.Equal(t, fs.ErrorNotDeleting, err)
 
@@ -972,10 +972,22 @@ func TestSyncWithUpdateOlder(t *testing.T) {
 		fs.Config.ModifyWindow = oldModifyWindow
 	}()
 
-	accounting.GlobalStats().ResetCounters()
 	err := Sync(context.Background(), r.Fremote, r.Flocal, false)
 	require.NoError(t, err)
 	fstest.CheckItems(t, r.Fremote, oneO, twoF, threeO, fourF, fiveF)
+
+	if r.Fremote.Hashes().Count() == 0 {
+		t.Logf("Skip test with --checksum as no hashes supported")
+		return
+	}
+
+	// now enable checksum
+	fs.Config.CheckSum = true
+	defer func() { fs.Config.CheckSum = false }()
+
+	err = Sync(context.Background(), r.Fremote, r.Flocal, false)
+	require.NoError(t, err)
+	fstest.CheckItems(t, r.Fremote, oneO, twoF, threeF, fourF, fiveF)
 }
 
 // Test with TrackRenames set
@@ -1751,5 +1763,7 @@ func TestAbort(t *testing.T) {
 	accounting.GlobalStats().ResetCounters()
 
 	err := Sync(context.Background(), r.Fremote, r.Flocal, false)
-	assert.Equal(t, accounting.ErrorMaxTransferLimitReached, err)
+	expectedErr := fserrors.FsError(accounting.ErrorMaxTransferLimitReached)
+	fserrors.Count(expectedErr)
+	assert.Equal(t, expectedErr, err)
 }

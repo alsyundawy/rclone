@@ -10,6 +10,7 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/configflags"
 	"github.com/rclone/rclone/fs/filter/filterflags"
+	"github.com/rclone/rclone/fs/log/logflags"
 	"github.com/rclone/rclone/fs/rc/rcflags"
 	"github.com/rclone/rclone/lib/atexit"
 	"github.com/spf13/cobra"
@@ -46,10 +47,11 @@ __rclone_custom_func() {
         else
             __rclone_init_completion -n : || return
         fi
+	local rclone=(command rclone --ask-password=false)
         if [[ $cur != *:* ]]; then
             local ifs=$IFS
             IFS=$'\n'
-            local remotes=($(command rclone listremotes))
+            local remotes=($("${rclone[@]}" listremotes 2> /dev/null))
             IFS=$ifs
             local remote
             for remote in "${remotes[@]}"; do
@@ -68,7 +70,7 @@ __rclone_custom_func() {
             fi
             local ifs=$IFS
             IFS=$'\n'
-            local lines=($(rclone lsf "${cur%%:*}:$prefix" 2>/dev/null))
+            local lines=($("${rclone[@]}" lsf "${cur%%:*}:$prefix" 2> /dev/null))
             IFS=$ifs
             local line
             for line in "${lines[@]}"; do
@@ -168,6 +170,7 @@ func setupRootCommand(rootCmd *cobra.Command) {
 	configflags.AddFlags(pflag.CommandLine)
 	filterflags.AddFlags(pflag.CommandLine)
 	rcflags.AddFlags(pflag.CommandLine)
+	logflags.AddFlags(pflag.CommandLine)
 
 	Root.Run = runRoot
 	Root.Flags().BoolVarP(&version, "version", "V", false, "Print the version number")

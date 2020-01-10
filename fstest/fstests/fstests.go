@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -151,16 +152,19 @@ func retry(t *testing.T, what string, f func() error) {
 	require.NoError(t, err, what)
 }
 
-// testPut puts file to the remote
+// testPut puts file with random contents to the remote
 func testPut(ctx context.Context, t *testing.T, f fs.Fs, file *fstest.Item) (string, fs.Object) {
+	return PutTestContents(ctx, t, f, file, random.String(100), true)
+}
+
+// PutTestContents puts file with given contents to the remote and checks it but unlike TestPutLarge doesn't remove
+func PutTestContents(ctx context.Context, t *testing.T, f fs.Fs, file *fstest.Item, contents string, check bool) (string, fs.Object) {
 	var (
 		err        error
 		obj        fs.Object
 		uploadHash *hash.MultiHasher
-		contents   string
 	)
 	retry(t, "Put", func() error {
-		contents = random.String(100)
 		buf := bytes.NewBufferString(contents)
 		uploadHash = hash.NewMultiHasher()
 		in := io.TeeReader(buf, uploadHash)
@@ -171,10 +175,12 @@ func testPut(ctx context.Context, t *testing.T, f fs.Fs, file *fstest.Item) (str
 		return err
 	})
 	file.Hashes = uploadHash.Sums()
-	file.Check(t, obj, f.Precision())
-	// Re-read the object and check again
-	obj = findObject(ctx, t, f, file.Path)
-	file.Check(t, obj, f.Precision())
+	if check {
+		file.Check(t, obj, f.Precision())
+		// Re-read the object and check again
+		obj = findObject(ctx, t, f, file.Path)
+		file.Check(t, obj, f.Precision())
+	}
 	return contents, obj
 }
 
@@ -260,6 +266,7 @@ type Opt struct {
 	UnimplementableObjectMethods []string // List of methods which can't be implemented in this wrapping Fs
 	SkipFsCheckWrap              bool     // if set skip FsCheckWrap
 	SkipObjectCheckWrap          bool     // if set skip ObjectCheckWrap
+	SkipInvalidUTF8              bool     // if set skip invalid UTF-8 checks
 }
 
 // returns true if x is found in ss
@@ -564,6 +571,9 @@ func Run(t *testing.T, opt *Opt) {
 				{"invalid UTF-8", "invalid utf-8\xfe"},
 			} {
 				t.Run(test.name, func(t *testing.T) {
+					if opt.SkipInvalidUTF8 && test.name == "invalid UTF-8" {
+						t.Skip("Skipping " + test.name)
+					}
 					// turn raw strings into Standard encoding
 					fileName := encoder.Standard.Encode(test.path)
 					dirName := fileName
@@ -1306,7 +1316,7 @@ func Run(t *testing.T, opt *Opt) {
 				require.NotNil(t, fileRemote)
 				assert.Equal(t, fs.ErrorIsFile, err)
 
-				if strings.HasPrefix(remoteName, "TestChunkerChunk") && strings.Contains(remoteName, "Nometa") {
+				if strings.HasPrefix(remoteName, "TestChunker") && strings.Contains(remoteName, "Nometa") {
 					// TODO fix chunker and remove this bypass
 					t.Logf("Skip listing check -- chunker can't yet handle this tricky case")
 					return
@@ -1562,36 +1572,39 @@ func Run(t *testing.T, opt *Opt) {
 					t.Skip("FS has no PutStream interface")
 				}
 
-				file := fstest.Item{
-					ModTime: fstest.Time("2001-02-03T04:05:06.499999999Z"),
-					Path:    "piped data.txt",
-					Size:    -1, // use unknown size during upload
+				for _, contentSize := range []int{0, 100} {
+					t.Run(strconv.Itoa(contentSize), func(t *testing.T) {
+						file := fstest.Item{
+							ModTime: fstest.Time("2001-02-03T04:05:06.499999999Z"),
+							Path:    "piped data.txt",
+							Size:    -1, // use unknown size during upload
+						}
+
+						var (
+							err        error
+							obj        fs.Object
+							uploadHash *hash.MultiHasher
+						)
+						retry(t, "PutStream", func() error {
+							contents := random.String(contentSize)
+							buf := bytes.NewBufferString(contents)
+							uploadHash = hash.NewMultiHasher()
+							in := io.TeeReader(buf, uploadHash)
+
+							file.Size = -1
+							obji := object.NewStaticObjectInfo(file.Path, file.ModTime, file.Size, true, nil, nil)
+							obj, err = remote.Features().PutStream(ctx, in, obji)
+							return err
+						})
+						file.Hashes = uploadHash.Sums()
+						file.Size = int64(contentSize) // use correct size when checking
+						file.Check(t, obj, remote.Precision())
+						// Re-read the object and check again
+						obj = findObject(ctx, t, remote, file.Path)
+						file.Check(t, obj, remote.Precision())
+						require.NoError(t, obj.Remove(ctx))
+					})
 				}
-
-				var (
-					err         error
-					obj         fs.Object
-					uploadHash  *hash.MultiHasher
-					contentSize = 100
-				)
-				retry(t, "PutStream", func() error {
-					contents := random.String(contentSize)
-					buf := bytes.NewBufferString(contents)
-					uploadHash = hash.NewMultiHasher()
-					in := io.TeeReader(buf, uploadHash)
-
-					file.Size = -1
-					obji := object.NewStaticObjectInfo(file.Path, file.ModTime, file.Size, true, nil, nil)
-					obj, err = remote.Features().PutStream(ctx, in, obji)
-					return err
-				})
-				file.Hashes = uploadHash.Sums()
-				file.Size = int64(contentSize) // use correct size when checking
-				file.Check(t, obj, remote.Precision())
-				// Re-read the object and check again
-				obj = findObject(ctx, t, remote, file.Path)
-				file.Check(t, obj, remote.Precision())
-				require.NoError(t, obj.Remove(ctx))
 			})
 
 			// TestInternal calls InternalTest() on the Fs

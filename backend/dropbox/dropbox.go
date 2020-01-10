@@ -113,7 +113,7 @@ var (
 
 // Register with Fs
 func init() {
-	DbHashType = hash.RegisterHash("Dropbox", 64, dbhash.New)
+	DbHashType = hash.RegisterHash("DropboxHash", 64, dbhash.New)
 	fs.Register(&fs.RegInfo{
 		Name:        "dropbox",
 		Description: "Dropbox",
@@ -388,8 +388,7 @@ func (f *Fs) getMetadata(objPath string) (entry files.IsMetadata, notFound bool,
 	if err != nil {
 		switch e := err.(type) {
 		case files.GetMetadataAPIError:
-			switch e.EndpointError.Path.Tag {
-			case files.LookupErrorNotFound:
+			if e.EndpointError != nil && e.EndpointError.Path != nil && e.EndpointError.Path.Tag == files.LookupErrorNotFound {
 				notFound = true
 				err = nil
 			}
@@ -489,8 +488,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 			if err != nil {
 				switch e := err.(type) {
 				case files.ListFolderAPIError:
-					switch e.EndpointError.Path.Tag {
-					case files.LookupErrorNotFound:
+					if e.EndpointError != nil && e.EndpointError.Path != nil && e.EndpointError.Path.Tag == files.LookupErrorNotFound {
 						err = fs.ErrorDirNotFound
 					}
 				}
@@ -1012,7 +1010,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	switch e := err.(type) {
 	case files.DownloadAPIError:
 		// Don't attempt to retry copyright violation errors
-		if e.EndpointError.Path.Tag == files.LookupErrorRestrictedContent {
+		if e.EndpointError != nil && e.EndpointError.Path != nil && e.EndpointError.Path.Tag == files.LookupErrorRestrictedContent {
 			return nil, fserrors.NoRetryError(err)
 		}
 	}
@@ -1130,8 +1128,7 @@ func (o *Object) uploadChunked(in0 io.Reader, commitInfo *files.CommitInfo, size
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
 	remote := o.remotePath()
 	if ignoredFiles.MatchString(remote) {
-		fs.Logf(o, "File name disallowed - not uploading")
-		return nil
+		return fserrors.NoRetryError(errors.Errorf("file name %q is disallowed - not uploading", path.Base(remote)))
 	}
 	commitInfo := files.NewCommitInfo(enc.FromStandardPath(o.remotePath()))
 	commitInfo.Mode.Tag = "overwrite"
