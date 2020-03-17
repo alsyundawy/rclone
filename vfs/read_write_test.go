@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fstest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -686,7 +688,12 @@ func TestRWFileModTimeWithOpenWriters(t *testing.T) {
 	err = fh.Node().SetModTime(mtime)
 	require.NoError(t, err)
 
-	err = fh.Close()
+	// Using Flush/Release to mimic mount instead of Close
+
+	err = fh.Flush()
+	require.NoError(t, err)
+
+	err = fh.Release()
 	require.NoError(t, err)
 
 	info, err := vfs.Stat("file1")
@@ -694,13 +701,20 @@ func TestRWFileModTimeWithOpenWriters(t *testing.T) {
 
 	if r.Fremote.Precision() != fs.ModTimeNotSupported {
 		// avoid errors because of timezone differences
-		assert.Equal(t, info.ModTime().Unix(), mtime.Unix())
+		assert.Equal(t, info.ModTime().Unix(), mtime.Unix(), fmt.Sprintf("Time mismatch: %v != %v", info.ModTime(), mtime))
 	}
+
+	file1 := fstest.NewItem("file1", "hi", mtime)
+	fstest.CheckItems(t, r.Fremote, file1)
 }
 
 func TestRWCacheRename(t *testing.T) {
 	r := fstest.NewRun(t)
 	defer r.Finalise()
+
+	if !operations.CanServerSideMove(r.Fremote) {
+		t.Skip("skip as can't rename files")
+	}
 
 	opt := DefaultOpt
 	opt.CacheMode = CacheModeFull

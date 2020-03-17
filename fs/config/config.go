@@ -14,6 +14,7 @@ import (
 	"log"
 	mathrand "math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -59,6 +60,12 @@ const (
 
 	// ConfigTokenURL is the config key used to store the token server endpoint
 	ConfigTokenURL = "token_url"
+
+	// ConfigEncoding is the config key to change the encoding for a backend
+	ConfigEncoding = "encoding"
+
+	// ConfigEncodingHelp is the help for ConfigEncoding
+	ConfigEncodingHelp = "This sets the encoding for the backend.\n\nSee: the [encoding section in the overview](/overview/#encoding) for more info."
 
 	// ConfigAuthorize indicates that we just want "rclone authorize"
 	ConfigAuthorize = "config_authorize"
@@ -233,15 +240,7 @@ var errorConfigFileNotFound = errors.New("config file not found")
 // loadConfigFile will load a config file, and
 // automatically decrypt it.
 func loadConfigFile() (*goconfig.ConfigFile, error) {
-	envpw := os.Getenv("RCLONE_CONFIG_PASS")
-	if len(configKey) == 0 && envpw != "" {
-		err := setConfigPassword(envpw)
-		if err != nil {
-			fs.Errorf(nil, "Using RCLONE_CONFIG_PASS returned: %v", err)
-		} else {
-			fs.Debugf(nil, "Using RCLONE_CONFIG_PASS password.")
-		}
-	}
+	var usingPasswordCommand bool
 
 	b, err := ioutil.ReadFile(ConfigPath)
 	if err != nil {
@@ -274,6 +273,53 @@ func loadConfigFile() (*goconfig.ConfigFile, error) {
 		return goconfig.LoadFromReader(bytes.NewBuffer(b))
 	}
 
+	if len(configKey) == 0 {
+		if len(fs.Config.PasswordCommand) != 0 {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			cmd := exec.Command(fs.Config.PasswordCommand[0], fs.Config.PasswordCommand[1:]...)
+
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+
+			if err := cmd.Run(); err != nil {
+				// One does not always get the stderr returned in the wrapped error.
+				fs.Errorf(nil, "Using --password-command returned: %v", err)
+				if ers := strings.TrimSpace(stderr.String()); ers != "" {
+					fs.Errorf(nil, "--password-command stderr: %s", ers)
+				}
+				return nil, errors.Wrap(err, "password command failed")
+			}
+			if pass := strings.Trim(stdout.String(), "\r\n"); pass != "" {
+				err := setConfigPassword(pass)
+				if err != nil {
+					return nil, errors.Wrap(err, "incorrect password")
+				}
+			} else {
+				return nil, errors.New("password-command returned empty string")
+			}
+
+			if len(configKey) == 0 {
+				return nil, errors.New("unable to decrypt configuration: incorrect password")
+			}
+			usingPasswordCommand = true
+		} else {
+			usingPasswordCommand = false
+
+			envpw := os.Getenv("RCLONE_CONFIG_PASS")
+
+			if envpw != "" {
+				err := setConfigPassword(envpw)
+				if err != nil {
+					fs.Errorf(nil, "Using RCLONE_CONFIG_PASS returned: %v", err)
+				} else {
+					fs.Debugf(nil, "Using RCLONE_CONFIG_PASS password.")
+				}
+			}
+		}
+	}
+
 	// Encrypted content is base64 encoded.
 	dec := base64.NewDecoder(base64.StdEncoding, r)
 	box, err := ioutil.ReadAll(dec)
@@ -304,6 +350,9 @@ func loadConfigFile() (*goconfig.ConfigFile, error) {
 			fs.Debugf(nil, "using _RCLONE_CONFIG_KEY_FILE for configKey")
 		} else {
 			if len(configKey) == 0 {
+				if usingPasswordCommand {
+					return nil, errors.New("using --password-command derived password, unable to decrypt configuration")
+				}
 				if !fs.Config.AskPassword {
 					return nil, errors.New("unable to decrypt configuration and not allowed to ask for password - set RCLONE_CONFIG_PASS to your configuration password")
 				}
@@ -509,6 +558,7 @@ func saveConfig() error {
 		_ = enc.Close()
 	}
 
+	_ = f.Sync()
 	err = f.Close()
 	if err != nil {
 		return errors.Errorf("Failed to close config file: %v", err)

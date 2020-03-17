@@ -439,7 +439,12 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 				return nil, err
 			}
 		}
-		signer, err := ssh.ParsePrivateKeyWithPassphrase(key, []byte(clearpass))
+		var signer ssh.Signer
+		if clearpass == "" {
+			signer, err = ssh.ParsePrivateKey(key)
+		} else {
+			signer, err = ssh.ParsePrivateKeyWithPassphrase(key, []byte(clearpass))
+		}
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to parse private key file")
 		}
@@ -1210,7 +1215,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	if err != nil {
 		return errors.Wrap(err, "Update")
 	}
-	file, err := c.sftpClient.Create(o.path())
+	file, err := c.sftpClient.OpenFile(o.path(), os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	o.fs.putSftpConnection(&c, err)
 	if err != nil {
 		return errors.Wrap(err, "Update Create failed")

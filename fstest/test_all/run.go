@@ -1,7 +1,5 @@
 // Run a test
 
-// +build go1.11
-
 package main
 
 import (
@@ -22,6 +20,7 @@ import (
 	"time"
 
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fstest/testserver"
 )
 
 // Control concurrency per backend if required
@@ -212,6 +211,16 @@ func (r *Run) trial() {
 		_, _ = fmt.Fprintln(out, "--dry-run is set - not running")
 		return
 	}
+
+	// Start the test server if required
+	finish, err := testserver.Start(r.Remote)
+	if err != nil {
+		log.Printf("%s: Failed to start test server: %v", r.Remote, err)
+		_, _ = fmt.Fprintf(out, "%s: Failed to start test server: %v\n", r.Remote, err)
+		r.err = err
+		return
+	}
+	defer finish()
 
 	// Internal buffer
 	var b bytes.Buffer

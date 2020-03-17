@@ -7,6 +7,7 @@ import (
 	"path"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
@@ -84,15 +85,32 @@ func newSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.Delete
 		srcEmptyDirs:       make(map[string]fs.DirEntry),
 		noTraverse:         fs.Config.NoTraverse,
 		noCheckDest:        fs.Config.NoCheckDest,
-		toBeChecked:        newPipe(accounting.Stats(ctx).SetCheckQueue, fs.Config.MaxBacklog),
-		toBeUploaded:       newPipe(accounting.Stats(ctx).SetTransferQueue, fs.Config.MaxBacklog),
 		deleteFilesCh:      make(chan fs.Object, fs.Config.Checkers),
 		trackRenames:       fs.Config.TrackRenames,
 		commonHash:         fsrc.Hashes().Overlap(fdst.Hashes()).GetOne(),
-		toBeRenamed:        newPipe(accounting.Stats(ctx).SetRenameQueue, fs.Config.MaxBacklog),
 		trackRenamesCh:     make(chan fs.Object, fs.Config.Checkers),
 	}
-	s.ctx, s.cancel = context.WithCancel(ctx)
+	var err error
+	s.toBeChecked, err = newPipe(fs.Config.OrderBy, accounting.Stats(ctx).SetCheckQueue, fs.Config.MaxBacklog)
+	if err != nil {
+		return nil, err
+	}
+	s.toBeUploaded, err = newPipe(fs.Config.OrderBy, accounting.Stats(ctx).SetTransferQueue, fs.Config.MaxBacklog)
+	if err != nil {
+		return nil, err
+	}
+	s.toBeRenamed, err = newPipe(fs.Config.OrderBy, accounting.Stats(ctx).SetRenameQueue, fs.Config.MaxBacklog)
+	if err != nil {
+		return nil, err
+	}
+	// If a max session duration has been defined add a deadline to the context
+	if fs.Config.MaxDuration > 0 {
+		endTime := time.Now().Add(fs.Config.MaxDuration)
+		fs.Infof(s.fdst, "Transfer session deadline: %s", endTime.Format("2006/01/02 15:04:05"))
+		s.ctx, s.cancel = context.WithDeadline(ctx, endTime)
+	} else {
+		s.ctx, s.cancel = context.WithCancel(ctx)
+	}
 	if s.noTraverse && s.deleteMode != fs.DeleteModeOff {
 		fs.Errorf(nil, "Ignoring --no-traverse with sync")
 		s.noTraverse = false
@@ -185,6 +203,9 @@ func (s *syncCopyMove) processError(err error) {
 	if err == nil {
 		return
 	}
+	if err == context.DeadlineExceeded {
+		err = fserrors.NoRetryError(err)
+	}
 	s.errorMu.Lock()
 	defer s.errorMu.Unlock()
 	switch {
@@ -220,10 +241,10 @@ func (s *syncCopyMove) currentError() error {
 // pairChecker reads Objects~s on in send to out if they need transferring.
 //
 // FIXME potentially doing lots of hashes at once
-func (s *syncCopyMove) pairChecker(in *pipe, out *pipe, wg *sync.WaitGroup) {
+func (s *syncCopyMove) pairChecker(in *pipe, out *pipe, fraction int, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for {
-		pair, ok := in.Get(s.ctx)
+		pair, ok := in.GetMax(s.ctx, fraction)
 		if !ok {
 			return
 		}
@@ -276,10 +297,10 @@ func (s *syncCopyMove) pairChecker(in *pipe, out *pipe, wg *sync.WaitGroup) {
 
 // pairRenamer reads Objects~s on in and attempts to rename them,
 // otherwise it sends them out if they need transferring.
-func (s *syncCopyMove) pairRenamer(in *pipe, out *pipe, wg *sync.WaitGroup) {
+func (s *syncCopyMove) pairRenamer(in *pipe, out *pipe, fraction int, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for {
-		pair, ok := in.Get(s.ctx)
+		pair, ok := in.GetMax(s.ctx, fraction)
 		if !ok {
 			return
 		}
@@ -295,11 +316,11 @@ func (s *syncCopyMove) pairRenamer(in *pipe, out *pipe, wg *sync.WaitGroup) {
 }
 
 // pairCopyOrMove reads Objects on in and moves or copies them.
-func (s *syncCopyMove) pairCopyOrMove(ctx context.Context, in *pipe, fdst fs.Fs, wg *sync.WaitGroup) {
+func (s *syncCopyMove) pairCopyOrMove(ctx context.Context, in *pipe, fdst fs.Fs, fraction int, wg *sync.WaitGroup) {
 	defer wg.Done()
 	var err error
 	for {
-		pair, ok := in.Get(s.ctx)
+		pair, ok := in.GetMax(s.ctx, fraction)
 		if !ok {
 			return
 		}
@@ -317,14 +338,15 @@ func (s *syncCopyMove) pairCopyOrMove(ctx context.Context, in *pipe, fdst fs.Fs,
 func (s *syncCopyMove) startCheckers() {
 	s.checkerWg.Add(fs.Config.Checkers)
 	for i := 0; i < fs.Config.Checkers; i++ {
-		go s.pairChecker(s.toBeChecked, s.toBeUploaded, &s.checkerWg)
+		fraction := (100 * i) / fs.Config.Checkers
+		go s.pairChecker(s.toBeChecked, s.toBeUploaded, fraction, &s.checkerWg)
 	}
 }
 
 // This stops the background checkers
 func (s *syncCopyMove) stopCheckers() {
 	s.toBeChecked.Close()
-	fs.Infof(s.fdst, "Waiting for checks to finish")
+	fs.Debugf(s.fdst, "Waiting for checks to finish")
 	s.checkerWg.Wait()
 }
 
@@ -332,14 +354,15 @@ func (s *syncCopyMove) stopCheckers() {
 func (s *syncCopyMove) startTransfers() {
 	s.transfersWg.Add(fs.Config.Transfers)
 	for i := 0; i < fs.Config.Transfers; i++ {
-		go s.pairCopyOrMove(s.ctx, s.toBeUploaded, s.fdst, &s.transfersWg)
+		fraction := (100 * i) / fs.Config.Transfers
+		go s.pairCopyOrMove(s.ctx, s.toBeUploaded, s.fdst, fraction, &s.transfersWg)
 	}
 }
 
 // This stops the background transfers
 func (s *syncCopyMove) stopTransfers() {
 	s.toBeUploaded.Close()
-	fs.Infof(s.fdst, "Waiting for transfers to finish")
+	fs.Debugf(s.fdst, "Waiting for transfers to finish")
 	s.transfersWg.Wait()
 }
 
@@ -350,7 +373,8 @@ func (s *syncCopyMove) startRenamers() {
 	}
 	s.renamerWg.Add(fs.Config.Checkers)
 	for i := 0; i < fs.Config.Checkers; i++ {
-		go s.pairRenamer(s.toBeRenamed, s.toBeUploaded, &s.renamerWg)
+		fraction := (100 * i) / fs.Config.Checkers
+		go s.pairRenamer(s.toBeRenamed, s.toBeUploaded, fraction, &s.renamerWg)
 	}
 }
 
@@ -360,7 +384,7 @@ func (s *syncCopyMove) stopRenamers() {
 		return
 	}
 	s.toBeRenamed.Close()
-	fs.Infof(s.fdst, "Waiting for renames to finish")
+	fs.Debugf(s.fdst, "Waiting for renames to finish")
 	s.renamerWg.Wait()
 }
 
@@ -732,6 +756,13 @@ func (s *syncCopyMove) run() error {
 		s.processError(deleteEmptyDirectories(s.ctx, s.fsrc, s.srcEmptyDirs))
 	}
 
+	// Read the error out of the context if there is one
+	s.processError(s.ctx.Err())
+
+	if accounting.Stats(s.ctx).GetTransfers() == 0 {
+		fs.Infof(nil, "There was nothing to transfer")
+	}
+
 	// cancel the context to free resources
 	s.cancel()
 	return s.currentError()
@@ -851,11 +882,15 @@ func (s *syncCopyMove) Match(ctx context.Context, dst, src fs.DirEntry) (recurse
 		// Do the same thing to the entire contents of the directory
 		_, ok := dst.(fs.Directory)
 		if ok {
-			// Record the src directory for deletion
-			s.srcEmptyDirsMu.Lock()
-			s.srcParentDirCheck(src)
-			s.srcEmptyDirs[src.Remote()] = src
-			s.srcEmptyDirsMu.Unlock()
+			// Only record matched (src & dst) empty dirs when performing move
+			if s.DoMove {
+				// Record the src directory for deletion
+				s.srcEmptyDirsMu.Lock()
+				s.srcParentDirCheck(src)
+				s.srcEmptyDirs[src.Remote()] = src
+				s.srcEmptyDirsMu.Unlock()
+			}
+
 			return true
 		}
 		// FIXME src is dir, dst is file

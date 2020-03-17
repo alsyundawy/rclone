@@ -54,6 +54,7 @@ type ConfigInfo struct {
 	Transfers              int
 	ConnectTimeout         time.Duration // Connect timeout
 	Timeout                time.Duration // Data channel timeout
+	ExpectContinueTimeout  time.Duration
 	Dump                   DumpFlags
 	InsecureSkipVerify     bool // Skip server certificate verification
 	DeleteMode             DeleteMode
@@ -88,8 +89,11 @@ type ConfigInfo struct {
 	StreamingUploadCutoff  SizeSuffix
 	StatsFileNameLength    int
 	AskPassword            bool
+	PasswordCommand        SpaceSepList
 	UseServerModTime       bool
 	MaxTransfer            SizeSuffix
+	MaxDuration            time.Duration
+	CutoffMode             CutoffMode
 	MaxBacklog             int
 	MaxStatsGroups         int
 	StatsOneLine           bool
@@ -103,7 +107,8 @@ type ConfigInfo struct {
 	ClientKey              string // Client Side Key
 	MultiThreadCutoff      SizeSuffix
 	MultiThreadStreams     int
-	MultiThreadSet         bool // whether MultiThreadStreams was set (set in fs/config/configflags)
+	MultiThreadSet         bool   // whether MultiThreadStreams was set (set in fs/config/configflags)
+	OrderBy                string // instructions on how to order the transfer
 }
 
 // NewConfig creates a new config with everything set to the default
@@ -120,6 +125,7 @@ func NewConfig() *ConfigInfo {
 	c.Transfers = 4
 	c.ConnectTimeout = 60 * time.Second
 	c.Timeout = 5 * 60 * time.Second
+	c.ExpectContinueTimeout = 1 * time.Second
 	c.DeleteMode = DeleteModeDefault
 	c.MaxDelete = -1
 	c.LowLevelRetries = 10

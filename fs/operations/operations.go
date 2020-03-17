@@ -4,10 +4,13 @@ package operations
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/csv"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"path"
 	"path/filepath"
 	"sort"
@@ -260,28 +263,79 @@ func removeFailedCopy(ctx context.Context, dst fs.Object) bool {
 	return true
 }
 
-// Wrapper to override the remote for an object
-type overrideRemoteObject struct {
-	fs.Object
+// OverrideRemote is a wrapper to override the Remote for an
+// ObjectInfo
+type OverrideRemote struct {
+	fs.ObjectInfo
 	remote string
 }
 
+// NewOverrideRemote returns an OverrideRemoteObject which will
+// return the remote specified
+func NewOverrideRemote(oi fs.ObjectInfo, remote string) *OverrideRemote {
+	return &OverrideRemote{
+		ObjectInfo: oi,
+		remote:     remote,
+	}
+}
+
 // Remote returns the overridden remote name
-func (o *overrideRemoteObject) Remote() string {
+func (o *OverrideRemote) Remote() string {
 	return o.remote
 }
 
 // MimeType returns the mime type of the underlying object or "" if it
 // can't be worked out
-func (o *overrideRemoteObject) MimeType(ctx context.Context) string {
-	if do, ok := o.Object.(fs.MimeTyper); ok {
+func (o *OverrideRemote) MimeType(ctx context.Context) string {
+	if do, ok := o.ObjectInfo.(fs.MimeTyper); ok {
 		return do.MimeType(ctx)
 	}
 	return ""
 }
 
-// Check interface is satisfied
-var _ fs.MimeTyper = (*overrideRemoteObject)(nil)
+// ID returns the ID of the Object if known, or "" if not
+func (o *OverrideRemote) ID() string {
+	if do, ok := o.ObjectInfo.(fs.IDer); ok {
+		return do.ID()
+	}
+	return ""
+}
+
+// UnWrap returns the Object that this Object is wrapping or nil if it
+// isn't wrapping anything
+func (o *OverrideRemote) UnWrap() fs.Object {
+	if o, ok := o.ObjectInfo.(fs.Object); ok {
+		return o
+	}
+	return nil
+}
+
+// GetTier returns storage tier or class of the Object
+func (o *OverrideRemote) GetTier() string {
+	if do, ok := o.ObjectInfo.(fs.GetTierer); ok {
+		return do.GetTier()
+	}
+	return ""
+}
+
+// Check all optional interfaces satisfied
+var _ fs.FullObjectInfo = (*OverrideRemote)(nil)
+
+// CommonHash returns a single hash.Type and a HashOption with that
+// type which is in common between the two fs.Fs.
+func CommonHash(fa, fb fs.Info) (hash.Type, *fs.HashesOption) {
+	// work out which hash to use - limit to 1 hash in common
+	var common hash.Set
+	hashType := hash.None
+	if !fs.Config.IgnoreChecksum {
+		common = fb.Hashes().Overlap(fa.Hashes())
+		if common.Count() > 0 {
+			hashType = common.GetOne()
+			common = hash.Set(hashType)
+		}
+	}
+	return hashType, &fs.HashesOption{Hashes: common}
+}
 
 // Copy src object to dst or f if nil.  If dst is nil then it uses
 // remote as the name of the new object.
@@ -301,27 +355,18 @@ func Copy(ctx context.Context, f fs.Fs, dst fs.Object, remote string, src fs.Obj
 	maxTries := fs.Config.LowLevelRetries
 	tries := 0
 	doUpdate := dst != nil
-	// work out which hash to use - limit to 1 hash in common
-	var common hash.Set
-	hashType := hash.None
-	if !fs.Config.IgnoreChecksum {
-		common = src.Fs().Hashes().Overlap(f.Hashes())
-		if common.Count() > 0 {
-			hashType = common.GetOne()
-			common = hash.Set(hashType)
-		}
-	}
-	hashOption := &fs.HashesOption{Hashes: common}
+	hashType, hashOption := CommonHash(f, src.Fs())
+
 	var actionTaken string
 	for {
 		// Try server side copy first - if has optional interface and
 		// is same underlying remote
 		actionTaken = "Copied (server side copy)"
+		if fs.Config.MaxTransfer >= 0 && (accounting.Stats(ctx).GetBytes() >= int64(fs.Config.MaxTransfer) ||
+			(fs.Config.CutoffMode == fs.CutoffModeCautious && accounting.Stats(ctx).GetBytesWithPending()+src.Size() >= int64(fs.Config.MaxTransfer))) {
+			return nil, accounting.ErrorMaxTransferLimitReachedFatal
+		}
 		if doCopy := f.Features().Copy; doCopy != nil && (SameConfig(src.Fs(), f) || (SameRemoteType(src.Fs(), f) && f.Features().ServerSideAcrossConfigs)) {
-			// Check transfer limit for server side copies
-			if fs.Config.MaxTransfer >= 0 && accounting.Stats(ctx).GetBytes() >= int64(fs.Config.MaxTransfer) {
-				return nil, accounting.ErrorMaxTransferLimitReached
-			}
 			in := tr.Account(nil) // account the transfer
 			in.ServerSideCopyStart()
 			newDst, err = doCopy(ctx, src, remote)
@@ -377,7 +422,7 @@ func Copy(ctx context.Context, f fs.Fs, dst fs.Object, remote string, src fs.Obj
 						var wrappedSrc fs.ObjectInfo = src
 						// We try to pass the original object if possible
 						if src.Remote() != remote {
-							wrappedSrc = &overrideRemoteObject{Object: src, remote: remote}
+							wrappedSrc = NewOverrideRemote(src, remote)
 						}
 						if doUpdate {
 							actionTaken = "Copied (replaced existing)"
@@ -602,7 +647,7 @@ func DeleteFilesWithBackupDir(ctx context.Context, toBeDeleted fs.ObjectsChan, b
 			}
 		}()
 	}
-	fs.Infof(nil, "Waiting for deletions to finish")
+	fs.Debugf(nil, "Waiting for deletions to finish")
 	wg.Wait()
 	if errorCount > 0 {
 		err := errors.Errorf("failed to delete %d files", errorCount)
@@ -834,7 +879,7 @@ func CheckFn(ctx context.Context, fdst, fsrc fs.Fs, check checkFn, oneway bool) 
 		Dir:      "",
 		Callback: c,
 	}
-	fs.Infof(fdst, "Waiting for checks to finish")
+	fs.Debugf(fdst, "Waiting for checks to finish")
 	err := m.Run()
 
 	if c.dstFilesMissing > 0 {
@@ -1006,8 +1051,9 @@ func Sha1sum(ctx context.Context, f fs.Fs, w io.Writer) error {
 }
 
 // hashSum returns the human readable hash for ht passed in.  This may
-// be UNSUPPORTED or ERROR.
-func hashSum(ctx context.Context, ht hash.Type, o fs.Object) string {
+// be UNSUPPORTED or ERROR. If it isn't returning a valid hash it will
+// return an error.
+func hashSum(ctx context.Context, ht hash.Type, o fs.Object) (string, error) {
 	var err error
 	tr := accounting.Stats(ctx).NewCheckingTransfer(o)
 	defer func() {
@@ -1020,14 +1066,27 @@ func hashSum(ctx context.Context, ht hash.Type, o fs.Object) string {
 		fs.Debugf(o, "Failed to read %v: %v", ht, err)
 		sum = "ERROR"
 	}
-	return sum
+	return sum, err
 }
 
 // HashLister does a md5sum equivalent for the hash type passed in
 func HashLister(ctx context.Context, ht hash.Type, f fs.Fs, w io.Writer) error {
 	return ListFn(ctx, f, func(o fs.Object) {
-		sum := hashSum(ctx, ht, o)
+		sum, _ := hashSum(ctx, ht, o)
 		syncFprintf(w, "%*s  %s\n", hash.Width(ht), sum, o.Remote())
+	})
+}
+
+// HashListerBase64 does a md5sum equivalent for the hash type passed in with base64 encoded
+func HashListerBase64(ctx context.Context, ht hash.Type, f fs.Fs, w io.Writer) error {
+	return ListFn(ctx, f, func(o fs.Object) {
+		sum, err := hashSum(ctx, ht, o)
+		if err == nil {
+			hexBytes, _ := hex.DecodeString(sum)
+			sum = base64.URLEncoding.EncodeToString(hexBytes)
+		}
+		width := base64.URLEncoding.EncodedLen(hash.Width(ht) / 2)
+		syncFprintf(w, "%*s  %s\n", width, sum, o.Remote())
 	})
 }
 
@@ -1255,17 +1314,29 @@ func Rcat(ctx context.Context, fdst fs.Fs, dstFileName string, in io.ReadCloser,
 	}()
 	in = tr.Account(in).WithBuffer()
 
-	hashes := hash.NewHashSet(fdst.Hashes().GetOne()) // just pick one hash
-	hashOption := &fs.HashesOption{Hashes: hashes}
-	hash, err := hash.NewMultiHasherTypes(hashes)
-	if err != nil {
-		return nil, err
-	}
 	readCounter := readers.NewCountingReader(in)
-	trackingIn := io.TeeReader(readCounter, hash)
+	var trackingIn io.Reader
+	var hasher *hash.MultiHasher
+	var options []fs.OpenOption
+	if !fs.Config.IgnoreChecksum {
+		hashes := hash.NewHashSet(fdst.Hashes().GetOne()) // just pick one hash
+		hashOption := &fs.HashesOption{Hashes: hashes}
+		options = append(options, hashOption)
+		hasher, err = hash.NewMultiHasherTypes(hashes)
+		if err != nil {
+			return nil, err
+		}
+		trackingIn = io.TeeReader(readCounter, hasher)
+	} else {
+		trackingIn = readCounter
+	}
 
 	compare := func(dst fs.Object) error {
-		src := object.NewStaticObjectInfo(dstFileName, modTime, int64(readCounter.BytesRead()), false, hash.Sums(), fdst)
+		var sums map[hash.Type]string
+		if hasher != nil {
+			sums = hasher.Sums()
+		}
+		src := object.NewStaticObjectInfo(dstFileName, modTime, int64(readCounter.BytesRead()), false, sums, fdst)
 		if !Equal(ctx, src, dst) {
 			err = errors.Errorf("corrupted on transfer")
 			err = fs.CountError(err)
@@ -1314,7 +1385,7 @@ func Rcat(ctx context.Context, fdst fs.Fs, dstFileName string, in io.ReadCloser,
 	}
 
 	objInfo := object.NewStaticObjectInfo(dstFileName, modTime, -1, false, nil, nil)
-	if dst, err = fStreamTo.Features().PutStream(ctx, in, objInfo, hashOption); err != nil {
+	if dst, err = fStreamTo.Features().PutStream(ctx, in, objInfo, options...); err != nil {
 		return dst, err
 	}
 	if err = compare(dst); err != nil {
@@ -1616,26 +1687,48 @@ func RcatSize(ctx context.Context, fdst fs.Fs, dstFileName string, in io.ReadClo
 	return obj, nil
 }
 
-// CopyURL copies the data from the url to (fdst, dstFileName)
-func CopyURL(ctx context.Context, fdst fs.Fs, dstFileName string, url string, dstFileNameFromURL bool) (dst fs.Object, err error) {
+// copyURLFunc is called from CopyURLFn
+type copyURLFunc func(ctx context.Context, dstFileName string, in io.ReadCloser, size int64, modTime time.Time) (err error)
+
+// copyURLFn copies the data from the url to the function supplied
+func copyURLFn(ctx context.Context, dstFileName string, url string, dstFileNameFromURL bool, fn copyURLFunc) (err error) {
 	client := fshttp.NewClient(fs.Config)
 	resp, err := client.Get(url)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer fs.CheckClose(resp.Body, &err)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, errors.Errorf("CopyURL failed: %s", resp.Status)
+		return errors.Errorf("CopyURL failed: %s", resp.Status)
 	}
-
+	modTime, err := http.ParseTime(resp.Header.Get("Last-Modified"))
+	if err != nil {
+		modTime = time.Now()
+	}
 	if dstFileNameFromURL {
 		dstFileName = path.Base(resp.Request.URL.Path)
 		if dstFileName == "." || dstFileName == "/" {
-			return nil, errors.Errorf("CopyURL failed: file name wasn't found in url")
+			return errors.Errorf("CopyURL failed: file name wasn't found in url")
 		}
 	}
+	return fn(ctx, dstFileName, resp.Body, resp.ContentLength, modTime)
+}
 
-	return RcatSize(ctx, fdst, dstFileName, resp.Body, resp.ContentLength, time.Now())
+// CopyURL copies the data from the url to (fdst, dstFileName)
+func CopyURL(ctx context.Context, fdst fs.Fs, dstFileName string, url string, dstFileNameFromURL bool) (dst fs.Object, err error) {
+	err = copyURLFn(ctx, dstFileName, url, dstFileNameFromURL, func(ctx context.Context, dstFileName string, in io.ReadCloser, size int64, modTime time.Time) (err error) {
+		dst, err = RcatSize(ctx, fdst, dstFileName, in, size, modTime)
+		return err
+	})
+	return dst, err
+}
+
+// CopyURLToWriter copies the data from the url to the io.Writer supplied
+func CopyURLToWriter(ctx context.Context, url string, out io.Writer) (err error) {
+	return copyURLFn(ctx, "", url, false, func(ctx context.Context, dstFileName string, in io.ReadCloser, size int64, modTime time.Time) (err error) {
+		_, err = io.Copy(out, in)
+		return err
+	})
 }
 
 // BackupDir returns the correctly configured --backup-dir

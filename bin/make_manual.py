@@ -45,6 +45,7 @@ docs = [
     "koofr.md",
     "mailru.md",
     "mega.md",
+    "memory.md",
     "azureblob.md",
     "onedrive.md",
     "opendrive.md",
@@ -54,6 +55,7 @@ docs = [
     "premiumizeme.md",
     "putio.md",
     "sftp.md",
+    "sugarsync.md",
     "union.md",
     "webdav.md",
     "yandex.md",
@@ -108,7 +110,7 @@ def read_doc(doc):
     # Remove icons
     contents = re.sub(r'<i class="fa.*?</i>\s*', "", contents)
     # Make [...](/links/) absolute
-    contents = re.sub(r'\((\/.*?\/)\)', r"(https://rclone.org\1)", contents)
+    contents = re.sub(r'\]\((\/.*?\/(#.*)?)\)', r"](https://rclone.org\1)", contents)
     # Interpret provider shortcode
     # {{< provider name="Amazon S3" home="https://aws.amazon.com/s3/" config="/s3/" >}}
     contents = re.sub(r'\{\{<\s+provider.*?name="(.*?)".*?>\}\}', r"\1", contents)

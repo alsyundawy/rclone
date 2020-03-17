@@ -56,13 +56,7 @@ func NewStats() *StatsInfo {
 func (s *StatsInfo) RemoteStats() (out rc.Params, err error) {
 	out = make(rc.Params)
 	s.mu.RLock()
-	dt := s.totalDuration()
-	dtSeconds := dt.Seconds()
-	speed := 0.0
-	if dt > 0 {
-		speed = float64(s.bytes) / dtSeconds
-	}
-	out["speed"] = speed
+	out["speed"] = s.Speed()
 	out["bytes"] = s.bytes
 	out["errors"] = s.errors
 	out["fatalError"] = s.fatalError
@@ -70,7 +64,7 @@ func (s *StatsInfo) RemoteStats() (out rc.Params, err error) {
 	out["checks"] = s.checks
 	out["transfers"] = s.transfers
 	out["deletes"] = s.deletes
-	out["elapsedTime"] = dtSeconds
+	out["elapsedTime"] = s.totalDuration().Seconds()
 	s.mu.RUnlock()
 	if !s.checking.empty() {
 		var c []string
@@ -99,6 +93,17 @@ func (s *StatsInfo) RemoteStats() (out rc.Params, err error) {
 		out["lastError"] = s.lastError.Error()
 	}
 	return out, nil
+}
+
+// Speed returns the average speed of the transfer in bytes/second
+func (s *StatsInfo) Speed() float64 {
+	dt := s.totalDuration()
+	dtSeconds := dt.Seconds()
+	speed := 0.0
+	if dt > 0 {
+		speed = float64(s.bytes) / dtSeconds
+	}
+	return speed
 }
 
 func (s *StatsInfo) transferRemoteStats(name string) rc.Params {
@@ -250,11 +255,11 @@ func (s *StatsInfo) String() string {
 
 	dt := s.totalDuration()
 	dtSeconds := dt.Seconds()
+	dtSecondsOnly := dt.Truncate(time.Second/10) % time.Minute
 	speed := 0.0
 	if dt > 0 {
 		speed = float64(s.bytes) / dtSeconds
 	}
-	dtRounded := dt - (dt % (time.Second / 10))
 
 	displaySpeed := speed
 	if fs.Config.DataRateUnit == "bits" {
@@ -329,7 +334,7 @@ func (s *StatsInfo) String() string {
 			_, _ = fmt.Fprintf(buf, "Transferred:   %10d / %d, %s\n",
 				s.transfers, totalTransfer, percent(s.transfers, totalTransfer))
 		}
-		_, _ = fmt.Fprintf(buf, "Elapsed time:  %10v\n", dtRounded)
+		_, _ = fmt.Fprintf(buf, "Elapsed time:  %10ss\n", strings.TrimRight(dt.Truncate(time.Minute).String(), "0s")+fmt.Sprintf("%.1f", dtSecondsOnly.Seconds()))
 	}
 
 	// checking and transferring have their own locking so unlock
@@ -380,6 +385,22 @@ func (s *StatsInfo) GetBytes() int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.bytes
+}
+
+// GetBytesWithPending returns the number of bytes transferred and remaining transfers
+func (s *StatsInfo) GetBytesWithPending() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	pending := int64(0)
+	for _, tr := range s.startedTransfers {
+		if tr.acc != nil {
+			bytes, size := tr.acc.progress()
+			if bytes < size {
+				pending += size - bytes
+			}
+		}
+	}
+	return s.bytes + pending
 }
 
 // Errors updates the stats for errors

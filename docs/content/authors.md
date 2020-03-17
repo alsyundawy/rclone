@@ -321,3 +321,29 @@ Contributors
   * Thomas Kriechbaumer <thomas@kriechbaumer.name>
   * Tennix <tennix@users.noreply.github.com>
   * Ole Schütt <ole@schuett.name>
+  * Kuang-che Wu <kcwu@csie.org>
+  * Thomas Eales <wingsuit@users.noreply.github.com>
+  * Paul Tinsley <paul.tinsley@vitalsource.com>
+  * Felix Hungenberg <git@shiftgeist.com>
+  * Benjamin Richter <github@dev.telepath.de>
+  * landall <cst_zf@qq.com>
+  * thestigma <thestigma@gmail.com>
+  * jtagcat <38327267+jtagcat@users.noreply.github.com>
+  * Damon Permezel <permezel@me.com>
+  * boosh <boosh@users.noreply.github.com>
+  * unbelauscht <58393353+unbelauscht@users.noreply.github.com>
+  * Motonori IWAMURO <vmi@nifty.com>
+  * Benjapol Worakan <benwrk@live.com>
+  * Dave Koston <dave.koston@stackpath.com>
+  * Durval Menezes <DurvalMenezes@users.noreply.github.com>
+  * Tim Gallant <me@timgallant.us>
+  * Frederick Zhang <frederick888@tsundere.moe>
+  * valery1707 <valery1707@gmail.com>
+  * Yves G <theYinYeti@yalis.fr>
+  * Shing Kit Chan <chanshingkit@gmail.com>
+  * Franklyn Tackitt <franklyn@tackitt.net>
+  * Robert-André Mauchin <zebob.m@gmail.com>
+  * evileye <48332831+ibiruai@users.noreply.github.com>
+  * Joachim Brandon LeBlanc <brandon@leblanc.codes>
+  * Patryk Jakuszew <patryk.jakuszew@gmail.com>
+  * fishbullet <shindu666@gmail.com>

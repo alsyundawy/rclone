@@ -41,6 +41,7 @@ See the following for detailed instructions for
   * [Koofr](/koofr/)
   * [Mail.ru Cloud](/mailru/)
   * [Mega](/mega/)
+  * [Memory](/memory/)
   * [Microsoft Azure Blob Storage](/azureblob/)
   * [Microsoft OneDrive](/onedrive/)
   * [Openstack Swift / Rackspace Cloudfiles / Memset Memstore](/swift/)
@@ -50,6 +51,7 @@ See the following for detailed instructions for
   * [put.io](/putio/)
   * [QingStor](/qingstor/)
   * [SFTP](/sftp/)
+  * [SugarSync](/sugarsync/)
   * [Union](/union/)
   * [WebDAV](/webdav/)
   * [Yandex Disk](/yandex/)
@@ -538,6 +540,19 @@ Do a trial run with no permanent changes.  Use this to see what rclone
 would do without actually doing it.  Useful when setting up the `sync`
 command which deletes files in the destination.
 
+### --expect-continue-timeout=TIME ###
+
+This specifies the amount of time to wait for a server's first
+response headers after fully writing the request headers if the
+request has an "Expect: 100-continue" header. Not all backends support
+using this.
+
+Zero means no timeout and causes the body to be sent immediately,
+without waiting for the server to approve.  This time does not include
+the time to send the request header.
+
+The default is `1s`.  Set to 0 to disable.
+
 ### --ignore-case-sync ###
 
 Using this option will cause rclone to ignore the case of the files 
@@ -671,8 +686,8 @@ queue is in use.  Note that it will use in the order of N kB of memory
 when the backlog is in use.
 
 Setting this large allows rclone to calculate how many files are
-pending more accurately and give a more accurate estimated finish
-time.
+pending more accurately, give a more accurate estimated finish
+time and make `--order-by` work more accurately.
 
 Setting this small will make rclone more synchronous to the listings
 of the remote which may be desirable.
@@ -701,6 +716,17 @@ files not recursed through are considered excluded and will be deleted
 on the destination.  Test first with `--dry-run` if you are not sure
 what will happen.
 
+### --max-duration=TIME ###
+
+Rclone will stop scheduling new transfers when it has run for the
+duration specified.
+
+Defaults to off.
+
+When the limit is reached any existing transfers will complete.
+
+Rclone won't exit with an error if the transfer limit is reached.
+
 ### --max-transfer=SIZE ###
 
 Rclone will stop transferring when it has reached the size specified.
@@ -709,6 +735,20 @@ Defaults to off.
 When the limit is reached all transfers will stop immediately.
 
 Rclone will exit with exit code 8 if the transfer limit is reached.
+
+### --cutoff-mode=hard|soft|cautious ###
+
+This modifies the behavior of `--max-transfer`
+Defaults to `--cutoff-mode=hard`.
+
+Specifiying `--cutoff-mode=hard` will stop transferring immediately
+when Rclone reaches the limit.
+
+Specifiying `--cutoff-mode=soft` will stop starting new transfers
+when Rclone reaches the limit.
+
+Specifiying `--cutoff-mode=cautious` will try to prevent Rclone
+from reaching the limit.
 
 ### --modify-window=TIME ###
 
@@ -823,6 +863,79 @@ files if they are incorrect as it would normally.
 This can be used if the remote is being synced with another tool also
 (eg the Google Drive client).
 
+### --order-by string ###
+
+The `--order-by` flag controls the order in which files in the backlog
+are processed in `rclone sync`, `rclone copy` and `rclone move`.
+
+The order by string is constructed like this.  The first part
+describes what aspect is being measured:
+
+- `size` - order by the size of the files
+- `name` - order by the full path of the files
+- `modtime` - order by the modification date of the files
+
+This can have a modifier appended with a comma:
+
+- `ascending` or `asc` - order so that the smallest (or oldest) is processed first
+- `descending` or `desc` - order so that the largest (or newest) is processed first
+- `mixed` - order so that the smallest is processed first for some threads and the largest for others
+
+If the modifier is `mixed` then it can have an optional percentage
+(which defaults to `50`), eg `size,mixed,25` which means that 25% of
+the threads should be taking the smallest items and 75% the
+largest. The threads which take the smallest first will always take
+the smallest first and likewise the largest first threads. The `mixed`
+mode can be useful to minimise the transfer time when you are
+transferring a mixture of large and small files - the large files are
+guaranteed upload threads and bandwidth and the small files will be
+processed continuously.
+
+If no modifier is supplied then the order is `ascending`.
+
+For example
+
+- `--order-by size,desc` - send the largest files first
+- `--order-by modtime,ascending` - send the oldest files first
+- `--order-by name` - send the files with alphabetically by path first
+
+If the `--order-by` flag is not supplied or it is supplied with an
+empty string then the default ordering will be used which is as
+scanned.  With `--checkers 1` this is mostly alphabetical, however
+with the default `--checkers 8` it is somewhat random.
+
+#### Limitations
+
+The `--order-by` flag does not do a separate pass over the data.  This
+means that it may transfer some files out of the order specified if
+
+- there are no files in the backlog or the source has not been fully scanned yet
+- there are more than [--max-backlog](#max-backlog-n) files in the backlog
+
+Rclone will do its best to transfer the best file it has so in
+practice this should not cause a problem.  Think of `--order-by` as
+being more of a best efforts flag rather than a perfect ordering.
+
+### --password-command SpaceSepList ###
+
+This flag supplies a program which should supply the config password
+when run. This is an alternative to rclone prompting for the password
+or setting the `RCLONE_CONFIG_PASS` variable.
+
+The argument to this should be a command with a space separated list
+of arguments. If one of the arguments has a space in then enclose it
+in `"`, if you want a literal `"` in an argument then enclose the
+argument in `"` and double the `"`. See [CSV encoding](https://godoc.org/encoding/csv)
+for more info.
+
+Eg
+
+    --password-command echo hello
+    --password-command echo "hello with space"
+    --password-command echo "hello with ""quotes"" and space"
+
+See the [Configuration Encryption](#configuration-encryption) for more info.
+
 ### -P, --progress ###
 
 This flag makes rclone update the stats in a static block in the
@@ -838,7 +951,7 @@ with the `--stats` flag.
 This can be used with the `--stats-one-line` flag for a simpler
 display.
 
-Note: On Windows until[this bug](https://github.com/Azure/go-ansiterm/issues/26)
+Note: On Windows until [this bug](https://github.com/Azure/go-ansiterm/issues/26)
 is fixed all non-ASCII characters will be replaced with `.` when
 `--progress` is in use.
 
@@ -1228,7 +1341,7 @@ your cloud services. This means that you should keep your
 
 If you are in an environment where that isn't possible, you can
 add a password to your configuration. This means that you will
-have to enter the password every time you start rclone.
+have to supply the password every time you start rclone.
 
 To add a password to your rclone configuration, execute `rclone config`.
 
@@ -1265,9 +1378,9 @@ c/u/q>
 ```
 
 Your configuration is now encrypted, and every time you start rclone
-you will now be asked for the password. In the same menu, you can
-change the password or completely remove encryption from your
-configuration.
+you will have to supply the password. See below for details.
+In the same menu, you can change the password or completely remove
+encryption from your configuration.
 
 There is no way to recover the configuration if you lose your password.
 
@@ -1299,11 +1412,36 @@ Then source the file when you want to use it.  From the shell you
 would do `source set-rclone-password`.  It will then ask you for the
 password and set it in the environment variable.
 
-If you are running rclone inside a script, you might want to disable 
+An alternate means of supplying the password is to provide a script
+which will retrieve the password and print on standard output.  This
+script should have a fully specified path name and not rely on any
+environment variables.  The script is supplied either via
+`--password-command="..."` command line argument or via the
+`RCLONE_PASSWORD_COMMAND` environment variable.
+
+One useful example of this is using the `passwordstore` application
+to retrieve the password:
+
+```
+export RCLONE_PASSWORD_COMMAND="pass rclone/config"
+```
+
+If the `passwordstore` password manager holds the password for the
+rclone configuration, using the script method means the password
+is primarily protected by the `passwordstore` system, and is never
+embedded in the clear in scripts, nor available for examination
+using the standard commands available.  It is quite possible with
+long running rclone sessions for copies of passwords to be innocently
+captured in log files or terminal scroll buffers, etc.  Using the
+script method of supplying the password enhances the security of
+the config password considerably.
+
+If you are running rclone inside a script, unless you are using the
+`--password-command` method, you might want to disable 
 password prompts. To do that, pass the parameter 
 `--ask-password=false` to rclone. This will make rclone fail instead
 of asking for a password if `RCLONE_CONFIG_PASS` doesn't contain
-a valid password.
+a valid password, and `--password-command` has not been supplied.
 
 
 Developer options
@@ -1321,7 +1459,14 @@ Write CPU profile to file.  This can be analysed with `go tool pprof`.
 #### --dump flag,flag,flag ####
 
 The `--dump` flag takes a comma separated list of flags to dump info
-about.  These are:
+about.
+
+Note that some headers including `Accept-Encoding` as shown may not 
+be correct in the request and the response may not show `Content-Encoding`
+if the go standard libraries auto gzip encoding was in effect. In this case 
+the body of the request will be gunzipped before showing it.
+
+The available flags are:
 
 #### --dump headers ####
 

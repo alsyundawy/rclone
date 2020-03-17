@@ -8,10 +8,7 @@
 [Installation](https://rclone.org/install/) |
 [Forum](https://forum.rclone.org/)
 
-[![Build Status](https://travis-ci.org/rclone/rclone.svg?branch=master)](https://travis-ci.org/rclone/rclone)
-[![Windows Build Status](https://ci.appveyor.com/api/projects/status/github/rclone/rclone?branch=master&passingText=windows%20-%20ok&svg=true)](https://ci.appveyor.com/project/rclone/rclone)
-[![Build Status](https://dev.azure.com/rclone/rclone/_apis/build/status/rclone.rclone?branchName=master)](https://dev.azure.com/rclone/rclone/_build/latest?definitionId=2&branchName=master)
-[![CircleCI](https://circleci.com/gh/rclone/rclone/tree/master.svg?style=svg)](https://circleci.com/gh/rclone/rclone/tree/master)
+[![Build Status](https://github.com/rclone/rclone/workflows/build/badge.svg)](https://github.com/rclone/rclone/actions?query=workflow%3Abuild)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rclone/rclone)](https://goreportcard.com/report/github.com/rclone/rclone)
 [![GoDoc](https://godoc.org/github.com/rclone/rclone?status.svg)](https://godoc.org/github.com/rclone/rclone) 
 [![Docker Pulls](https://img.shields.io/docker/pulls/rclone/rclone)](https://hub.docker.com/r/rclone/rclone)
@@ -46,6 +43,7 @@ Rclone *("rsync for cloud storage")* is a command line program to sync files and
   * Mail.ru Cloud [:page_facing_up:](https://rclone.org/mailru/)
   * Memset Memstore [:page_facing_up:](https://rclone.org/swift/)
   * Mega [:page_facing_up:](https://rclone.org/mega/)
+  * Memory [:page_facing_up:](https://rclone.org/memory/)
   * Microsoft Azure Blob Storage [:page_facing_up:](https://rclone.org/azureblob/)
   * Microsoft OneDrive [:page_facing_up:](https://rclone.org/onedrive/)
   * Minio [:page_facing_up:](https://rclone.org/s3/#minio)
@@ -62,6 +60,8 @@ Rclone *("rsync for cloud storage")* is a command line program to sync files and
   * Rackspace Cloud Files [:page_facing_up:](https://rclone.org/swift/)
   * Scaleway [:page_facing_up:](https://rclone.org/s3/#scaleway)
   * SFTP [:page_facing_up:](https://rclone.org/sftp/)
+  * StackPath [:page_facing_up:](https://rclone.org/s3/#stackpath)
+  * SugarSync [:page_facing_up:](https://rclone.org/sugarsync/)
   * Wasabi [:page_facing_up:](https://rclone.org/s3/#wasabi)
   * WebDAV [:page_facing_up:](https://rclone.org/webdav/)
   * Yandex Disk [:page_facing_up:](https://rclone.org/yandex/)

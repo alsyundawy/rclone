@@ -16,9 +16,13 @@ import (
 	"github.com/rclone/rclone/fs/fserrors"
 )
 
-// ErrorMaxTransferLimitReached is returned from Read when the max
+// ErrorMaxTransferLimitReached defines error when transfer limit is reached.
+// Used for checking on exit and matching to correct exit code.
+var ErrorMaxTransferLimitReached = errors.New("Max transfer limit reached as set by --max-transfer")
+
+// ErrorMaxTransferLimitReachedFatal is returned from Read when the max
 // transfer limit is reached.
-var ErrorMaxTransferLimitReached = fserrors.FatalError(errors.New("Max transfer limit reached as set by --max-transfer"))
+var ErrorMaxTransferLimitReachedFatal = fserrors.FatalError(ErrorMaxTransferLimitReached)
 
 // Account limits and accounts for one transfer
 type Account struct {
@@ -61,7 +65,10 @@ func newAccountSizeName(stats *StatsInfo, in io.ReadCloser, size int64, name str
 		exit:   make(chan struct{}),
 		avg:    0,
 		lpTime: time.Now(),
-		max:    int64(fs.Config.MaxTransfer),
+		max:    -1,
+	}
+	if fs.Config.CutoffMode == fs.CutoffModeHard {
+		acc.max = int64((fs.Config.MaxTransfer))
 	}
 	go acc.averageLoop()
 	stats.inProgress.set(acc.name, acc)
@@ -164,19 +171,22 @@ func (acc *Account) averageLoop() {
 	}
 }
 
-// Check the read is valid
-func (acc *Account) checkRead() (err error) {
+// Check the read is valid returning the number of bytes it is over
+func (acc *Account) checkRead() (over int64, err error) {
 	acc.statmu.Lock()
-	if acc.max >= 0 && acc.stats.GetBytes() >= acc.max {
-		acc.statmu.Unlock()
-		return ErrorMaxTransferLimitReached
+	if acc.max >= 0 {
+		over = acc.stats.GetBytes() - acc.max
+		if over >= 0 {
+			acc.statmu.Unlock()
+			return over, ErrorMaxTransferLimitReachedFatal
+		}
 	}
 	// Set start time.
 	if acc.start.IsZero() {
 		acc.start = time.Now()
 	}
 	acc.statmu.Unlock()
-	return nil
+	return over, nil
 }
 
 // ServerSideCopyStart should be called at the start of a server side copy
@@ -216,10 +226,18 @@ func (acc *Account) accountRead(n int) {
 
 // read bytes from the io.Reader passed in and account them
 func (acc *Account) read(in io.Reader, p []byte) (n int, err error) {
-	err = acc.checkRead()
+	_, err = acc.checkRead()
 	if err == nil {
 		n, err = in.Read(p)
 		acc.accountRead(n)
+		if over, checkErr := acc.checkRead(); checkErr == ErrorMaxTransferLimitReachedFatal {
+			// chop the overage off
+			n -= int(over)
+			if n < 0 {
+				n = 0
+			}
+			err = checkErr
+		}
 	}
 	return n, err
 }
@@ -235,7 +253,7 @@ func (acc *Account) Read(p []byte) (n int, err error) {
 func (acc *Account) AccountRead(n int) (err error) {
 	acc.mu.Lock()
 	defer acc.mu.Unlock()
-	err = acc.checkRead()
+	_, err = acc.checkRead()
 	if err == nil {
 		acc.accountRead(n)
 	}

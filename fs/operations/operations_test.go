@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -38,10 +39,12 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/filter"
+	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fstest"
+	"github.com/rclone/rclone/lib/random"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -223,6 +226,43 @@ func TestHashSums(t *testing.T) {
 	if !strings.Contains(res, "9dc7f7d3279715991a22853f5981df582b7f9f6d  potato2\n") &&
 		!strings.Contains(res, "                             UNSUPPORTED  potato2\n") &&
 		!strings.Contains(res, "                                          potato2\n") {
+		t.Errorf("potato2 missing: %q", res)
+	}
+
+	// QuickXorHash Sum
+
+	buf.Reset()
+	var ht hash.Type
+	err = ht.Set("QuickXorHash")
+	require.NoError(t, err)
+	err = operations.HashLister(context.Background(), ht, r.Fremote, &buf)
+	require.NoError(t, err)
+	res = buf.String()
+	if !strings.Contains(res, "2d00000000000000000000000100000000000000  empty space\n") &&
+		!strings.Contains(res, "                             UNSUPPORTED  empty space\n") &&
+		!strings.Contains(res, "                                          empty space\n") {
+		t.Errorf("empty space missing: %q", res)
+	}
+	if !strings.Contains(res, "4001dad296b6b4a52d6d694b67dad296b6b4a52d  potato2\n") &&
+		!strings.Contains(res, "                             UNSUPPORTED  potato2\n") &&
+		!strings.Contains(res, "                                          potato2\n") {
+		t.Errorf("potato2 missing: %q", res)
+	}
+
+	// QuickXorHash Sum with Base64 Encoded
+
+	buf.Reset()
+	err = operations.HashListerBase64(context.Background(), ht, r.Fremote, &buf)
+	require.NoError(t, err)
+	res = buf.String()
+	if !strings.Contains(res, "LQAAAAAAAAAAAAAAAQAAAAAAAAA=  empty space\n") &&
+		!strings.Contains(res, "                 UNSUPPORTED  empty space\n") &&
+		!strings.Contains(res, "                              empty space\n") {
+		t.Errorf("empty space missing: %q", res)
+	}
+	if !strings.Contains(res, "QAHa0pa2tKUtbWlLZ9rSlra0pS0=  potato2\n") &&
+		!strings.Contains(res, "                 UNSUPPORTED  potato2\n") &&
+		!strings.Contains(res, "                              potato2\n") {
 		t.Errorf("potato2 missing: %q", res)
 	}
 }
@@ -663,6 +703,37 @@ func TestCopyURL(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(len(contents)), o.Size())
 	fstest.CheckListingWithPrecision(t, r.Fremote, []fstest.Item{file1, file2, fstest.NewItem(urlFileName, contents, t1)}, nil, fs.ModTimeNotSupported)
+}
+
+func TestCopyURLToWriter(t *testing.T) {
+	contents := "file contents\n"
+
+	// check when reading from regular HTTP server
+	status := 0
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if status != 0 {
+			http.Error(w, "an error ocurred", status)
+			return
+		}
+		_, err := w.Write([]byte(contents))
+		assert.NoError(t, err)
+	})
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	// test normal fetch
+	var buf bytes.Buffer
+	err := operations.CopyURLToWriter(context.Background(), ts.URL, &buf)
+	require.NoError(t, err)
+	assert.Equal(t, contents, buf.String())
+
+	// test fetch with error
+	status = http.StatusNotFound
+	buf.Reset()
+	err = operations.CopyURLToWriter(context.Background(), ts.URL, &buf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Not Found")
+	assert.Equal(t, 0, len(buf.String()))
 }
 
 func TestMoveFile(t *testing.T) {
@@ -1371,4 +1442,159 @@ func TestGetFsInfo(t *testing.T) {
 	}
 	assert.Equal(t, f.Hashes(), hashSet)
 	assert.Equal(t, f.Features().Enabled(), info.Features)
+}
+
+func TestRcat(t *testing.T) {
+	check := func(withChecksum, ignoreChecksum bool) {
+		checksumBefore, ignoreChecksumBefore := fs.Config.CheckSum, fs.Config.IgnoreChecksum
+		fs.Config.CheckSum, fs.Config.IgnoreChecksum = withChecksum, ignoreChecksum
+		defer func() {
+			fs.Config.CheckSum, fs.Config.IgnoreChecksum = checksumBefore, ignoreChecksumBefore
+		}()
+
+		var prefix string
+		if withChecksum {
+			prefix = "with_checksum_"
+		} else {
+			prefix = "no_checksum_"
+		}
+		if ignoreChecksum {
+			prefix = "ignore_checksum_"
+		}
+
+		r := fstest.NewRun(t)
+		defer r.Finalise()
+
+		if *fstest.SizeLimit > 0 && int64(fs.Config.StreamingUploadCutoff) > *fstest.SizeLimit {
+			savedCutoff := fs.Config.StreamingUploadCutoff
+			defer func() {
+				fs.Config.StreamingUploadCutoff = savedCutoff
+			}()
+			fs.Config.StreamingUploadCutoff = fs.SizeSuffix(*fstest.SizeLimit)
+			t.Logf("Adjust StreamingUploadCutoff to size limit %s (was %s)", fs.Config.StreamingUploadCutoff, savedCutoff)
+		}
+
+		fstest.CheckListing(t, r.Fremote, []fstest.Item{})
+
+		data1 := "this is some really nice test data"
+		path1 := prefix + "small_file_from_pipe"
+
+		data2 := string(make([]byte, fs.Config.StreamingUploadCutoff+1))
+		path2 := prefix + "big_file_from_pipe"
+
+		in := ioutil.NopCloser(strings.NewReader(data1))
+		_, err := operations.Rcat(context.Background(), r.Fremote, path1, in, t1)
+		require.NoError(t, err)
+
+		in = ioutil.NopCloser(strings.NewReader(data2))
+		_, err = operations.Rcat(context.Background(), r.Fremote, path2, in, t2)
+		require.NoError(t, err)
+
+		file1 := fstest.NewItem(path1, data1, t1)
+		file2 := fstest.NewItem(path2, data2, t2)
+		fstest.CheckItems(t, r.Fremote, file1, file2)
+	}
+
+	for i := 0; i < 4; i++ {
+		withChecksum := (i & 1) != 0
+		ignoreChecksum := (i & 2) != 0
+		t.Run(fmt.Sprintf("withChecksum=%v,ignoreChecksum=%v", withChecksum, ignoreChecksum), func(t *testing.T) {
+			check(withChecksum, ignoreChecksum)
+		})
+	}
+}
+
+func TestRcatSize(t *testing.T) {
+	r := fstest.NewRun(t)
+	defer r.Finalise()
+
+	const body = "------------------------------------------------------------"
+	file1 := r.WriteFile("potato1", body, t1)
+	file2 := r.WriteFile("potato2", body, t2)
+	// Test with known length
+	bodyReader := ioutil.NopCloser(strings.NewReader(body))
+	obj, err := operations.RcatSize(context.Background(), r.Fremote, file1.Path, bodyReader, int64(len(body)), file1.ModTime)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(body)), obj.Size())
+	assert.Equal(t, file1.Path, obj.Remote())
+
+	// Test with unknown length
+	bodyReader = ioutil.NopCloser(strings.NewReader(body)) // reset Reader
+	ioutil.NopCloser(strings.NewReader(body))
+	obj, err = operations.RcatSize(context.Background(), r.Fremote, file2.Path, bodyReader, -1, file2.ModTime)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(body)), obj.Size())
+	assert.Equal(t, file2.Path, obj.Remote())
+
+	// Check files exist
+	fstest.CheckItems(t, r.Fremote, file1, file2)
+}
+
+func TestCopyFileMaxTransfer(t *testing.T) {
+	r := fstest.NewRun(t)
+	defer r.Finalise()
+	old := fs.Config.MaxTransfer
+	oldMode := fs.Config.CutoffMode
+
+	defer func() {
+		fs.Config.MaxTransfer = old
+		fs.Config.CutoffMode = oldMode
+		accounting.Stats(context.Background()).ResetCounters()
+	}()
+
+	ctx := context.Background()
+
+	const sizeCutoff = 2048
+	file1 := r.WriteFile("file1", "file1 contents", t1)
+	file2 := r.WriteFile("file2", "file2 contents"+random.String(sizeCutoff), t2)
+
+	rfile1 := file1
+	rfile1.Path = "sub/file1"
+	rfile2a := file2
+	rfile2a.Path = "sub/file2a"
+	rfile2b := file2
+	rfile2b.Path = "sub/file2b"
+	rfile2c := file2
+	rfile2c.Path = "sub/file2c"
+
+	fs.Config.MaxTransfer = sizeCutoff
+	fs.Config.CutoffMode = fs.CutoffModeHard
+	accounting.Stats(ctx).ResetCounters()
+
+	err := operations.CopyFile(ctx, r.Fremote, r.Flocal, rfile1.Path, file1.Path)
+	require.NoError(t, err)
+	fstest.CheckItems(t, r.Flocal, file1, file2)
+	fstest.CheckItems(t, r.Fremote, rfile1)
+
+	accounting.Stats(ctx).ResetCounters()
+
+	err = operations.CopyFile(ctx, r.Fremote, r.Flocal, rfile2a.Path, file2.Path)
+	require.NotNil(t, err)
+	assert.Contains(t, err.Error(), "Max transfer limit reached")
+	assert.True(t, fserrors.IsFatalError(err))
+	fstest.CheckItems(t, r.Flocal, file1, file2)
+	fstest.CheckItems(t, r.Fremote, rfile1)
+
+	fs.Config.CutoffMode = fs.CutoffModeCautious
+	accounting.Stats(ctx).ResetCounters()
+
+	err = operations.CopyFile(ctx, r.Fremote, r.Flocal, rfile2b.Path, file2.Path)
+	require.NotNil(t, err)
+	assert.Contains(t, err.Error(), "Max transfer limit reached")
+	assert.True(t, fserrors.IsFatalError(err))
+	fstest.CheckItems(t, r.Flocal, file1, file2)
+	fstest.CheckItems(t, r.Fremote, rfile1)
+
+	if strings.HasPrefix(r.Fremote.Name(), "TestChunker") {
+		t.Log("skipping remainder of test for chunker as it involves multiple transfers")
+		return
+	}
+
+	fs.Config.CutoffMode = fs.CutoffModeSoft
+	accounting.Stats(ctx).ResetCounters()
+
+	err = operations.CopyFile(ctx, r.Fremote, r.Flocal, rfile2c.Path, file2.Path)
+	require.NoError(t, err)
+	fstest.CheckItems(t, r.Flocal, file1, file2)
+	fstest.CheckItems(t, r.Fremote, rfile1, rfile2c)
 }

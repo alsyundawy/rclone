@@ -36,6 +36,7 @@ var (
 	NoAppleDouble      = true        // use noappledouble by default
 	NoAppleXattr       = false       // do not use noapplexattr by default
 	DaemonTimeout      time.Duration // OSXFUSE only
+	AsyncRead          = true        // do async reads by default
 )
 
 // Global constants
@@ -98,16 +99,22 @@ func checkMountpointOverlap(root, mountpoint string) error {
 }
 
 // NewMountCommand makes a mount command with the given name and Mount function
-func NewMountCommand(commandName string, Mount func(f fs.Fs, mountpoint string) error) *cobra.Command {
+func NewMountCommand(commandName string, hidden bool, Mount func(f fs.Fs, mountpoint string) error) *cobra.Command {
 	var commandDefinition = &cobra.Command{
-		Use:   commandName + " remote:path /path/to/mountpoint",
-		Short: `Mount the remote as file system on a mountpoint.`,
+		Use:    commandName + " remote:path /path/to/mountpoint",
+		Hidden: hidden,
+		Short:  `Mount the remote as file system on a mountpoint.`,
 		Long: `
 rclone ` + commandName + ` allows Linux, FreeBSD, macOS and Windows to
 mount any of Rclone's cloud storage systems as a file system with
 FUSE.
 
 First set up your remote using ` + "`rclone config`" + `.  Check it works with ` + "`rclone ls`" + ` etc.
+
+You can either run mount in foreground mode or background(daemon) mode. Mount runs in
+foreground mode by default, use the --daemon flag to specify background mode mode.
+Background mode is only supported on Linux and OSX, you can only run mount in
+foreground mode on Windows.
 
 Start the mount like this
 
@@ -117,11 +124,15 @@ Or on Windows like this where X: is an unused drive letter
 
     rclone ` + commandName + ` remote:path/to/files X:
 
-When the program ends, either via Ctrl+C or receiving a SIGINT or SIGTERM signal,
-the mount is automatically stopped.
+When running in background mode the user will have to stop the mount manually (specified below).
+
+When the program ends while in foreground mode, either via Ctrl+C or receiving
+a SIGINT or SIGTERM signal, the mount is automatically stopped.
 
 The umount operation can fail, for example when the mountpoint is busy.
-When that happens, it is the user's responsibility to stop the mount manually with
+When that happens, it is the user's responsibility to stop the mount manually.
+
+Stopping the mount manually:
 
     # Linux
     fusermount -u /path/to/local/mount
@@ -156,6 +167,34 @@ account (using [the WinFsp.Launcher
 infrastructure](https://github.com/billziss-gh/winfsp/wiki/WinFsp-Service-Architecture))
 which creates drives accessible for everyone on the system or
 alternatively using [the nssm service manager](https://nssm.cc/usage).
+
+#### Mount as a network drive
+
+By default, rclone will mount the remote as a normal drive. However,
+you can also mount it as a **Network Drive** (or **Network Share**, as
+mentioned in some places)
+
+Unlike other systems, Windows provides a different filesystem type for
+network drives.  Windows and other programs treat the network drives
+and fixed/removable drives differently: In network drives, many I/O
+operations are optimized, as the high latency and low reliability
+(compared to a normal drive) of a network is expected.
+
+Although many people prefer network shares to be mounted as normal
+system drives, this might cause some issues, such as programs not
+working as expected or freezes and errors while operating with the
+mounted remote in Windows Explorer. If you experience any of those,
+consider mounting rclone remotes as network shares, as Windows expects
+normal drives to be fast and reliable, while cloud storage is far from
+that.  See also [Limitations](#limitations) section below for more
+info
+
+Add "--fuse-flag --VolumePrefix=\server\share" to your "mount"
+command, **replacing "share" with any other name of your choice if you
+are mounting more than one remote**. Otherwise, the mountpoints will
+conflict and your mounted filesystems will overlap.
+
+[Read more about drive mapping](https://en.wikipedia.org/wiki/Drive_mapping)
 
 ### Limitations
 
@@ -283,6 +322,9 @@ be copied to the vfs cache before opening with --vfs-cache-mode full.
 			VolumeName = strings.Replace(VolumeName, ":", " ", -1)
 			VolumeName = strings.Replace(VolumeName, "/", " ", -1)
 			VolumeName = strings.TrimSpace(VolumeName)
+			if runtime.GOOS == "windows" && len(VolumeName) > 32 {
+				VolumeName = VolumeName[:32]
+			}
 
 			// Start background task if --background is specified
 			if Daemon {
@@ -318,6 +360,7 @@ be copied to the vfs cache before opening with --vfs-cache-mode full.
 	flags.BoolVarP(cmdFlags, &Daemon, "daemon", "", Daemon, "Run mount as a daemon (background mode).")
 	flags.StringVarP(cmdFlags, &VolumeName, "volname", "", VolumeName, "Set the volume name (not supported by all OSes).")
 	flags.DurationVarP(cmdFlags, &DaemonTimeout, "daemon-timeout", "", DaemonTimeout, "Time limit for rclone to respond to kernel (not supported by all OSes).")
+	flags.BoolVarP(cmdFlags, &AsyncRead, "async-read", "", AsyncRead, "Use asynchronous reads.")
 
 	if runtime.GOOS == "darwin" {
 		flags.BoolVarP(cmdFlags, &NoAppleDouble, "noappledouble", "", NoAppleDouble, "Sets the OSXFUSE option noappledouble.")

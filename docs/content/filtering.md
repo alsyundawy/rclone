@@ -17,7 +17,8 @@ Each path as it passes through rclone is matched against the include
 and exclude rules like `--include`, `--exclude`, `--include-from`,
 `--exclude-from`, `--filter`, or `--filter-from`. The simplest way to
 try them out is using the `ls` command, or `--dry-run` together with
-`-v`.
+`-v`. `--filter-from`, `--exclude-from`, `--include-from`, `--files-from`
+understand `-` as a file name to mean read from standard input.
 
 ## Patterns ##
 
@@ -304,6 +305,10 @@ from the sync.
 This reads a list of file names from the file passed in and **only**
 these files are transferred.  The **filtering rules are ignored**
 completely if you use this option.
+
+`--files-from` expects a list of files as it's input. [rclone lsf](/commands/rclone_lsf/)
+has a compatible format that can be used to export file lists from
+remotes.
 
 Rclone will traverse the file system if you use `--files-from`,
 effectively using the files in `--files-from` as a set of filters.
