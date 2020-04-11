@@ -551,6 +551,7 @@ type baseObject struct {
 	modifiedDate string // RFC3339 time it was last modified
 	mimeType     string // The object MIME type
 	bytes        int64  // size of the object
+	parents      int    // number of parents
 }
 type documentObject struct {
 	baseObject
@@ -616,6 +617,9 @@ func (f *Fs) shouldRetry(err error) (bool, error) {
 					return false, fserrors.FatalError(err)
 				}
 				return true, err
+			} else if f.opt.StopOnUploadLimit && reason == "teamDriveFileLimitExceeded" {
+				fs.Errorf(f, "Received team drive file limit error: %v", err)
+				return false, fserrors.FatalError(err)
 			}
 		}
 	}
@@ -1173,6 +1177,7 @@ func (f *Fs) newBaseObject(remote string, info *drive.File) baseObject {
 		modifiedDate: modifiedDate,
 		mimeType:     info.MimeType,
 		bytes:        size,
+		parents:      len(info.Parents),
 	}
 }
 
@@ -2986,6 +2991,9 @@ func (o *linkObject) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo
 
 // Remove an object
 func (o *baseObject) Remove(ctx context.Context) error {
+	if o.parents > 1 {
+		return errors.New("can't delete safely - has multiple parents")
+	}
 	var err error
 	err = o.fs.pacer.Call(func() (bool, error) {
 		if o.fs.opt.UseTrash {

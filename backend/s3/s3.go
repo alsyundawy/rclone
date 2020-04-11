@@ -641,7 +641,7 @@ isn't set then "acl" is used instead.`,
 		}, {
 			Name:     "server_side_encryption",
 			Help:     "The server-side encryption algorithm used when storing this object in S3.",
-			Provider: "AWS",
+			Provider: "AWS,Ceph,Minio",
 			Examples: []fs.OptionExample{{
 				Value: "",
 				Help:  "None",
@@ -653,15 +653,45 @@ isn't set then "acl" is used instead.`,
 				Help:  "aws:kms",
 			}},
 		}, {
+			Name:     "sse_customer_algorithm",
+			Help:     "If using SSE-C, the server-side encryption algorithm used when storing this object in S3.",
+			Provider: "AWS,Ceph,Minio",
+			Advanced: true,
+			Examples: []fs.OptionExample{{
+				Value: "",
+				Help:  "None",
+			}, {
+				Value: "AES256",
+				Help:  "AES256",
+			}},
+		}, {
 			Name:     "sse_kms_key_id",
 			Help:     "If using KMS ID you must provide the ARN of Key.",
-			Provider: "AWS",
+			Provider: "AWS,Ceph,Minio",
 			Examples: []fs.OptionExample{{
 				Value: "",
 				Help:  "None",
 			}, {
 				Value: "arn:aws:kms:us-east-1:*",
 				Help:  "arn:aws:kms:*",
+			}},
+		}, {
+			Name:     "sse_customer_key",
+			Help:     "If using SSE-C you must provide the secret encyption key used to encrypt/decrypt your data.",
+			Provider: "AWS,Ceph,Minio",
+			Advanced: true,
+			Examples: []fs.OptionExample{{
+				Value: "",
+				Help:  "None",
+			}},
+		}, {
+			Name:     "sse_customer_key_md5",
+			Help:     "If using SSE-C you must provide the secret encryption key MD5 checksum.",
+			Provider: "AWS,Ceph,Minio",
+			Advanced: true,
+			Examples: []fs.OptionExample{{
+				Value: "",
+				Help:  "None",
 			}},
 		}, {
 			Name:     "storage_class",
@@ -889,6 +919,9 @@ type Options struct {
 	BucketACL             string               `config:"bucket_acl"`
 	ServerSideEncryption  string               `config:"server_side_encryption"`
 	SSEKMSKeyID           string               `config:"sse_kms_key_id"`
+	SSECustomerAlgorithm  string               `config:"sse_customer_algorithm"`
+	SSECustomerKey        string               `config:"sse_customer_key"`
+	SSECustomerKeyMD5     string               `config:"sse_customer_key_md5"`
 	StorageClass          string               `config:"storage_class"`
 	UploadCutoff          fs.SizeSuffix        `config:"upload_cutoff"`
 	CopyCutoff            fs.SizeSuffix        `config:"copy_cutoff"`
@@ -908,19 +941,18 @@ type Options struct {
 
 // Fs represents a remote s3 server
 type Fs struct {
-	name          string               // the name of the remote
-	root          string               // root of the bucket - ignore all objects above this
-	opt           Options              // parsed options
-	features      *fs.Features         // optional features
-	c             *s3.S3               // the connection to the s3 server
-	ses           *session.Session     // the s3 session
-	rootBucket    string               // bucket part of root (if any)
-	rootDirectory string               // directory part of root (if any)
-	cache         *bucket.Cache        // cache for bucket creation status
-	pacer         *fs.Pacer            // To pace the API calls
-	srv           *http.Client         // a plain http client
-	poolMu        sync.Mutex           // mutex protecting memory pools map
-	pools         map[int64]*pool.Pool // memory pools
+	name          string           // the name of the remote
+	root          string           // root of the bucket - ignore all objects above this
+	opt           Options          // parsed options
+	features      *fs.Features     // optional features
+	c             *s3.S3           // the connection to the s3 server
+	ses           *session.Session // the s3 session
+	rootBucket    string           // bucket part of root (if any)
+	rootDirectory string           // directory part of root (if any)
+	cache         *bucket.Cache    // cache for bucket creation status
+	pacer         *fs.Pacer        // To pace the API calls
+	srv           *http.Client     // a plain http client
+	pool          *pool.Pool       // memory pool
 }
 
 // Object describes a s3 object
@@ -1214,7 +1246,12 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		pacer: fs.NewPacer(pacer.NewS3(pacer.MinSleep(minSleep))),
 		cache: bucket.NewCache(),
 		srv:   fshttp.NewClient(fs.Config),
-		pools: make(map[int64]*pool.Pool),
+		pool: pool.New(
+			time.Duration(opt.MemoryPoolFlushTime),
+			int(opt.ChunkSize),
+			opt.UploadConcurrency*fs.Config.Transfers,
+			opt.MemoryPoolUseMmap,
+		),
 	}
 
 	f.setRoot(root)
@@ -1464,7 +1501,7 @@ func (f *Fs) list(ctx context.Context, bucket, directory, prefix string, addBuck
 				continue
 			}
 			remote = remote[len(prefix):]
-			isDirectory := strings.HasSuffix(remote, "/")
+			isDirectory := remote == "" || strings.HasSuffix(remote, "/")
 			if addBucket {
 				remote = path.Join(bucket, remote)
 			}
@@ -1905,19 +1942,16 @@ func (f *Fs) Hashes() hash.Set {
 }
 
 func (f *Fs) getMemoryPool(size int64) *pool.Pool {
-	f.poolMu.Lock()
-	defer f.poolMu.Unlock()
-
-	_, ok := f.pools[size]
-	if !ok {
-		f.pools[size] = pool.New(
-			time.Duration(f.opt.MemoryPoolFlushTime),
-			int(size),
-			f.opt.UploadConcurrency*fs.Config.Transfers,
-			f.opt.MemoryPoolUseMmap,
-		)
+	if size == int64(f.opt.ChunkSize) {
+		return f.pool
 	}
-	return f.pools[size]
+
+	return pool.New(
+		time.Duration(f.opt.MemoryPoolFlushTime),
+		int(size),
+		f.opt.UploadConcurrency*fs.Config.Transfers,
+		f.opt.MemoryPoolUseMmap,
+	)
 }
 
 // ------------------------------------------------------------
@@ -2083,6 +2117,15 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	req := s3.GetObjectInput{
 		Bucket: &bucket,
 		Key:    &bucketPath,
+	}
+	if o.fs.opt.SSECustomerAlgorithm != "" {
+		req.SSECustomerAlgorithm = &o.fs.opt.SSECustomerAlgorithm
+	}
+	if o.fs.opt.SSECustomerKey != "" {
+		req.SSECustomerKey = &o.fs.opt.SSECustomerKey
+	}
+	if o.fs.opt.SSECustomerKeyMD5 != "" {
+		req.SSECustomerKeyMD5 = &o.fs.opt.SSECustomerKeyMD5
 	}
 	fs.FixRangeOption(options, o.bytes)
 	for _, option := range options {
@@ -2263,7 +2306,7 @@ func (o *Object) uploadMultipart(ctx context.Context, req *s3.PutObjectInput, si
 			})
 
 			// return the memory and token
-			memPool.Put(buf[:partSize])
+			memPool.Put(buf)
 			tokens.Put()
 
 			if err != nil {
@@ -2350,6 +2393,15 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	}
 	if o.fs.opt.ServerSideEncryption != "" {
 		req.ServerSideEncryption = &o.fs.opt.ServerSideEncryption
+	}
+	if o.fs.opt.SSECustomerAlgorithm != "" {
+		req.SSECustomerAlgorithm = &o.fs.opt.SSECustomerAlgorithm
+	}
+	if o.fs.opt.SSECustomerKey != "" {
+		req.SSECustomerKey = &o.fs.opt.SSECustomerKey
+	}
+	if o.fs.opt.SSECustomerKeyMD5 != "" {
+		req.SSECustomerKeyMD5 = &o.fs.opt.SSECustomerKeyMD5
 	}
 	if o.fs.opt.SSEKMSKeyID != "" {
 		req.SSEKMSKeyId = &o.fs.opt.SSEKMSKeyID
